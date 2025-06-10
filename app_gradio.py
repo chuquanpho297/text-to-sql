@@ -81,14 +81,14 @@ def load_model():
         # Create prompt template
         prompt_template = PromptTemplate(
             input_variables=["schema", "question"],
-            template="""Given the database schema and question below, generate only the SQL query. Return just the SQL code without any explanation or formatting.
+            template="""Convert the question to SQL based on the schema. Return ONLY the SQL query, nothing else.
 
 Schema:
 {schema}
 
 Question: {question}
 
-SQL:""",
+SQL: """,
         )
 
         # Create LCEL chain (modern LangChain syntax)
@@ -130,12 +130,31 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
         # Clean up the response
         sql_response = result.strip()
 
-        print("response: ", sql_response)
+        print("Raw response: ", sql_response)
 
-        print("End response")
-        # Remove any extra text that might be generated
-        if "SQL Query:" in sql_response:
-            sql_response = sql_response.split("SQL Query:")[-1].strip()
+        # Remove any extra text that might be generated after the SQL
+        # Split by common separators and take only the first part (the SQL)
+        separators = ["Human:", "Assistant:", "Note:", "Explanation:", "\n\n", "I'm sorry", "I can't", "If you have"]
+        
+        for separator in separators:
+            if separator in sql_response:
+                sql_response = sql_response.split(separator)[0].strip()
+                break
+        
+        # Remove common prefixes
+        prefixes_to_remove = ["SQL Query:", "SQL:", "Query:", "Answer:"]
+        for prefix in prefixes_to_remove:
+            if sql_response.startswith(prefix):
+                sql_response = sql_response[len(prefix):].strip()
+        
+        # Remove any trailing text after semicolon if it's not SQL
+        if ";" in sql_response:
+            parts = sql_response.split(";")
+            if len(parts) > 1:
+                # Keep the SQL part (first part + semicolon)
+                sql_response = parts[0].strip() + ";"
+        
+        print("Cleaned response: ", sql_response)
 
         # If response is empty or too short, return an error
         if not sql_response or len(sql_response) < 5:
