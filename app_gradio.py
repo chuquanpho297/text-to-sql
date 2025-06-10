@@ -8,20 +8,25 @@ import gradio as gr
 import os
 import re
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from langchain_huggingface import HuggingFacePipeline
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 import sqlparse  # For better SQL formatting and validation
 
 # Load environment variables
 load_dotenv()
 
-# Global variables for model and tokenizer
+# Global variables for model and LangChain pipeline
 model = None
 tokenizer = None
+llm_pipeline = None
+llm_chain = None
 
 def load_model():
-    """Load the fine-tuned model and tokenizer with progress updates"""
-    global model, tokenizer
+    """Load the fine-tuned model and tokenizer with LangChain pipeline"""
+    global model, tokenizer, llm_pipeline, llm_chain
     try:
         model_name = "hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned"
         
@@ -54,17 +59,55 @@ def load_model():
         if torch.cuda.is_available() and model.device.type == 'cpu':
             model = model.cuda()
         
+        yield "🔄 Setting up LangChain pipeline..."
+        
+        # Create HuggingFace pipeline for text generation
+        hf_pipeline = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=256,
+            temperature=0.1,
+            do_sample=True,
+            top_p=0.95,
+            repetition_penalty=1.1,
+            return_full_text=False,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+        
+        # Create LangChain HuggingFace pipeline
+        llm_pipeline = HuggingFacePipeline(pipeline=hf_pipeline)
+        
+        # Create prompt template
+        prompt_template = PromptTemplate(
+            input_variables=["schema", "question"],
+            template="""You are an AI assistant specialized in converting natural language questions into accurate SQL queries. Based on the question's context and the provided database schema, generate an optimized, concise, and syntactically correct SQL query. Do not explain, only return the SQL.
+
+Database's schema:
+
+{schema}
+
+Question:
+{question}
+
+SQL Query:"""
+        )
+        
+        # Create LLM chain
+        llm_chain = LLMChain(llm=llm_pipeline, prompt=prompt_template)
+        
         device_info = f"({model.device})" if hasattr(model, 'device') else ""
-        yield f"✅ Model loaded successfully! {device_info}"
+        yield f"✅ Model and LangChain pipeline loaded successfully! {device_info}"
         
     except Exception as e:
         yield f"❌ Error loading model: {str(e)}"
 
 def generate_sql(schema_text, question, progress=gr.Progress()):
-    """Generate SQL query using the fine-tuned model"""
-    global model, tokenizer
+    """Generate SQL query using LangChain with the fine-tuned model"""
+    global llm_chain
     
-    if model is None or tokenizer is None:
+    if llm_chain is None:
         return "❌ Please load the model first by clicking 'Load Model' button."
     
     if not schema_text.strip():
@@ -74,70 +117,25 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
         return "❌ Please provide a question."
     
     try:
-        progress(0.1, desc="Preparing prompt...")
+        progress(0.2, desc="Preparing inputs...")
         
-        # Format the prompt similar to training format
-        prompt = f"Database's schema:\n\n{schema_text.strip()}\n\nQuestion:\n{question.strip()}"
+        # Use LangChain to generate SQL
+        progress(0.5, desc="Generating SQL with LangChain...")
         
-        system_prompt = "You are an AI assistant specialized in converting natural language questions into accurate SQL queries. Based on the question's context and an implicit database schema, generate an optimized, concise, and syntactically correct SQL query. Do not explain, only return the SQL."
+        # Run the chain with the inputs
+        result = llm_chain.run({
+            "schema": schema_text.strip(),
+            "question": question.strip()
+        })
         
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-        
-        progress(0.3, desc="Applying chat template...")
-        
-        # Apply chat template
-        formatted_prompt = tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
-        
-        progress(0.5, desc="Tokenizing input...")
-        
-        # Tokenize
-        inputs = tokenizer(
-            formatted_prompt, 
-            return_tensors="pt", 
-            truncation=True, 
-            max_length=1024,
-            padding=True
-        )
-        
-        if torch.cuda.is_available() and model.device.type == 'cuda':
-            inputs = {k: v.cuda() for k, v in inputs.items()}
-        
-        progress(0.7, desc="Generating SQL...")
-        
-        # Generate
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                temperature=0.1,
-                do_sample=True,
-                top_p=0.95,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                repetition_penalty=1.1,
-                num_beams=1  # Faster generation
-            )
-        
-        progress(0.9, desc="Processing output...")
-        
-        # Decode
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Extract only the generated SQL (after the assistant token)
-        if "<|im_start|>assistant" in generated_text:
-            sql_response = generated_text.split("<|im_start|>assistant")[-1].strip()
-        else:
-            sql_response = generated_text[len(formatted_prompt):].strip()
+        progress(0.8, desc="Processing output...")
         
         # Clean up the response
-        sql_response = sql_response.replace("<|im_end|>", "").strip()
+        sql_response = result.strip()
+        
+        # Remove any extra text that might be generated
+        if "SQL Query:" in sql_response:
+            sql_response = sql_response.split("SQL Query:")[-1].strip()
         
         # If response is empty or too short, return an error
         if not sql_response or len(sql_response) < 5:
@@ -261,16 +259,18 @@ def clear_memory():
     return "💾 Running on CPU - no GPU memory to clear"
 
 def get_model_info():
-    """Get current model information"""
-    global model, tokenizer
-    if model is None:
-        return "❌ No model loaded"
+    """Get current model and LangChain pipeline information"""
+    global model, tokenizer, llm_pipeline, llm_chain
+    if model is None or llm_chain is None:
+        return "❌ No model or LangChain pipeline loaded"
     
     device = getattr(model, 'device', 'unknown')
     model_size = sum(p.numel() for p in model.parameters()) / 1e6  # millions of parameters
     
     info = f"✅ Model loaded on {device}\n"
     info += f"📊 Parameters: ~{model_size:.1f}M\n"
+    info += f"🔗 LangChain Pipeline: {'✅ Active' if llm_pipeline else '❌ Not loaded'}\n"
+    info += f"⛓️ LangChain Chain: {'✅ Active' if llm_chain else '❌ Not loaded'}\n"
     
     if torch.cuda.is_available():
         memory_used = torch.cuda.memory_allocated() / 1e9  # GB
@@ -366,7 +366,7 @@ def create_interface():
         gr.HTML("""
         <div style="text-align: center; padding: 20px;">
             <h1 style="color: #2E86AB; margin-bottom: 10px;">🗄️ SQL Generator Chat</h1>
-            <p style="color: #666; font-size: 18px;">Powered by XiYanSQL-QwenCoder-3B Fine-tuned Model</p>
+            <p style="color: #666; font-size: 18px;">Powered by XiYanSQL-QwenCoder-3B Fine-tuned Model with LangChain</p>
         </div>
         """)
         
@@ -424,6 +424,7 @@ def create_interface():
                 <div class="model-info">
                     <h3>ℹ️ Model Information</h3>
                     <p><strong>Model:</strong> XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned</p>
+                    <p><strong>Framework:</strong> LangChain + HuggingFace Transformers</p>
                     <p><strong>Purpose:</strong> Converting natural language to SQL queries</p>
                     <p><strong>Input:</strong> Database schema + Question</p>
                     <p><strong>Output:</strong> SQL query</p>
