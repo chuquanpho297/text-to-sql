@@ -81,16 +81,14 @@ def load_model():
         # Create prompt template
         prompt_template = PromptTemplate(
             input_variables=["schema", "question"],
-            template="""You are an AI assistant specialized in converting natural language questions into accurate SQL queries. Based on the question's context and the provided database schema, generate an optimized, concise, and syntactically correct SQL query. Do not explain, only return the SQL.
+            template="""Given the database schema and question below, generate only the SQL query. Return just the SQL code without any explanation or formatting.
 
-Database's schema:
-
+Schema:
 {schema}
 
-Question:
-{question}
+Question: {question}
 
-SQL Query:""",
+SQL:""",
         )
 
         # Create LCEL chain (modern LangChain syntax)
@@ -134,6 +132,7 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
         print("response: ", sql_response)
 
+        print("End response")
         # Remove any extra text that might be generated
         if "SQL Query:" in sql_response:
             sql_response = sql_response.split("SQL Query:")[-1].strip()
