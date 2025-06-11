@@ -216,7 +216,7 @@ instruct_finetune_args = UnslothTrainingArguments(
     hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
     hub_private_repo=True,
     # CRITICAL CHANGES FOR 32B MODEL:
-    per_device_train_batch_size=1,  # Reduced from 4 to 1 for memory
+    per_device_train_batch_size=64,  # Reduced from 4 to 1 for memory
     gradient_accumulation_steps=16,  # Increased from 4 to 16 to maintain effective batch size of 16
     warmup_steps=5,
     num_train_epochs=1,  # Set this for 1 full training run.
