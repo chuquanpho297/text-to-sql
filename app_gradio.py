@@ -33,7 +33,7 @@ def load_model():
 
         # Check if we have a HuggingFace token
         hf_token = os.getenv("HUGGINGFACE_TOKEN")
-
+        print("HuggingFace Token:", hf_token)
         yield "🔄 Loading tokenizer..."
 
         tokenizer = AutoTokenizer.from_pretrained(
