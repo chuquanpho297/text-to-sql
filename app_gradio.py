@@ -13,6 +13,7 @@ from langchain.prompts import PromptTemplate
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 import sqlparse  # For better SQL formatting and validation
+from mschema_implementation import sql_to_mschema
 
 # Load environment variables
 load_dotenv()
@@ -81,14 +82,16 @@ def load_model():
         # Create prompt template
         prompt_template = PromptTemplate(
             input_variables=["schema", "question"],
-            template="""Convert the question to SQL based on the schema. Return ONLY the SQL query, nothing else.
+            template="""You are now a SQL data analyst, and you are given a database schema as follows:
 
-Schema:
+【Schema】
 {schema}
 
-Question: {question}
+【Question】
+{question}
 
-SQL: """,
+Please read and understand the database schema carefully, and generate an executable SQL based on the user's question. The generated SQL is protected by ```sql and ```.
+""",
         )
 
         # Create LCEL chain (modern LangChain syntax)
@@ -99,6 +102,108 @@ SQL: """,
 
     except Exception as e:
         yield f"❌ Error loading model: {str(e)}"
+
+
+def csv_to_sql_context(csv_schema):
+    """Convert CSV format schema to SQL context for M-Schema processing"""
+    if not csv_schema.strip():
+        return ""
+
+    sql_parts = []
+    current_table = None
+
+    lines = csv_schema.strip().split("\n")
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Check if this is a table declaration
+        if line.startswith("Table:"):
+            current_table = line.replace("Table:", "").strip()
+            continue
+
+        # If we have a current table, process the data
+        if current_table:
+            # First non-table line should be column headers
+            if "," in line and not any(char.isdigit() for char in line.split(",")[0]):
+                # This is likely a header row
+                columns = [col.strip() for col in line.split(",")]
+
+                # Generate CREATE TABLE statement
+                create_cols = []
+                for col in columns:
+                    # Simple type inference
+                    if "id" in col.lower():
+                        create_cols.append(f"{col} INTEGER")
+                    elif "date" in col.lower():
+                        create_cols.append(f"{col} DATE")
+                    elif (
+                        "price" in col.lower()
+                        or "amount" in col.lower()
+                        or "salary" in col.lower()
+                    ):
+                        create_cols.append(f"{col} REAL")
+                    else:
+                        create_cols.append(f"{col} TEXT")
+
+                # Add PRIMARY KEY to first column if it contains 'id'
+                if "id" in columns[0].lower():
+                    create_cols[0] += " PRIMARY KEY"
+
+                sql_parts.append(
+                    f"CREATE TABLE {current_table} ({', '.join(create_cols)});"
+                )
+
+            elif "," in line:
+                # This is likely a data row
+                values = [val.strip() for val in line.split(",")]
+
+                # Quote non-numeric values
+                quoted_values = []
+                for val in values:
+                    if val.lower() == "null":
+                        quoted_values.append("NULL")
+                    elif val.isdigit() or (
+                        val.replace(".", "").isdigit() and val.count(".") <= 1
+                    ):
+                        quoted_values.append(val)
+                    else:
+                        quoted_values.append(f"'{val}'")
+
+                # Get column names from the CREATE TABLE statement
+                for sql_part in reversed(sql_parts):
+                    if f"CREATE TABLE {current_table}" in sql_part:
+                        # Extract column names from CREATE TABLE
+                        create_part = sql_part.split("(")[1].split(")")[0]
+                        columns = [col.split()[0] for col in create_part.split(",")]
+
+                        sql_parts.append(
+                            f"INSERT INTO {current_table} ({', '.join(columns)}) VALUES ({', '.join(quoted_values)});"
+                        )
+                        break
+
+    return "\n".join(sql_parts)
+
+
+def parse_sql_schema(schema_text):
+    """Parse SQL schema text to extract database name and SQL context"""
+    schema_text = schema_text.strip()
+    
+    # Extract database name if present
+    db_name = "database"  # default
+    sql_context = schema_text
+    
+    if schema_text.startswith("DB_NAME:"):
+        lines = schema_text.split('\n')
+        first_line = lines[0].strip()
+        if first_line.startswith("DB_NAME:"):
+            db_name = first_line.replace("DB_NAME:", "").strip()
+            # Remove the DB_NAME line and rejoin the rest
+            sql_context = '\n'.join(lines[1:]).strip()
+    
+    return db_name, sql_context
 
 
 def generate_sql(schema_text, question, progress=gr.Progress()):
@@ -117,12 +222,29 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
     try:
         progress(0.2, desc="Preparing inputs...")
 
+        # Check if input is in new SQL format or old CSV format
+        progress(0.3, desc="Converting schema to M-Schema format...")
+        
+        if schema_text.strip().startswith("DB_NAME:") or "CREATE TABLE" in schema_text:
+            # New SQL format
+            db_name, sql_context = parse_sql_schema(schema_text.strip())
+        else:
+            # Old CSV format - convert to SQL first
+            sql_context = csv_to_sql_context(schema_text.strip())
+            db_name = "database"
+            
+            if not sql_context:
+                return "❌ Failed to parse the schema. Please check the format."
+
+        # Convert to M-Schema format
+        mschema_format = sql_to_mschema(sql_context, db_name)
+
         # Use LangChain to generate SQL
         progress(0.5, desc="Generating SQL with LangChain...")
 
-        # Use the chain with the inputs (modern LCEL syntax)
+        # Use the chain with the M-Schema formatted input
         result = llm_chain.invoke(
-            {"schema": schema_text.strip(), "question": question.strip()}
+            {"schema": mschema_format, "question": question.strip()}
         )
 
         progress(0.8, desc="Processing output...")
@@ -134,26 +256,35 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
         # Remove any extra text that might be generated after the SQL
         # Split by common separators and take only the first part (the SQL)
-        separators = ["Human:", "Assistant:", "Note:", "Explanation:", "\n\n", "I'm sorry", "I can't", "If you have"]
-        
+        separators = [
+            "Human:",
+            "Assistant:",
+            "Note:",
+            "Explanation:",
+            "\n\n",
+            "I'm sorry",
+            "I can't",
+            "If you have",
+        ]
+
         for separator in separators:
             if separator in sql_response:
                 sql_response = sql_response.split(separator)[0].strip()
                 break
-        
+
         # Remove common prefixes
         prefixes_to_remove = ["SQL Query:", "SQL:", "Query:", "Answer:"]
         for prefix in prefixes_to_remove:
             if sql_response.startswith(prefix):
-                sql_response = sql_response[len(prefix):].strip()
-        
+                sql_response = sql_response[len(prefix) :].strip()
+
         # Remove any trailing text after semicolon if it's not SQL
         if ";" in sql_response:
             parts = sql_response.split(";")
             if len(parts) > 1:
                 # Keep the SQL part (first part + semicolon)
                 sql_response = parts[0].strip() + ";"
-        
+
         print("Cleaned response: ", sql_response)
 
         # If response is empty or too short, return an error
@@ -186,81 +317,187 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
 # Example schemas
 EXAMPLE_SCHEMAS = {
-    "E-commerce Database": """Table: customers
-customer_id,name,email,phone
-1,John Doe,john@email.com,123-456-7890
-2,Jane Smith,jane@email.com,098-765-4321
+    "E-commerce Database": """DB_NAME: ecommerce
+    CREATE TABLE customers (
+        customer_id INTEGER PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        phone TEXT
+    );
 
-Table: products
-product_id,name,price,category
-1,Laptop,999.99,Electronics
-2,Book,29.99,Education
-3,Phone,699.99,Electronics
+    CREATE TABLE products (
+        product_id INTEGER PRIMARY KEY,
+        name TEXT,
+        price REAL,
+        category TEXT
+    );
 
-Table: orders
-order_id,customer_id,product_id,quantity,order_date
-1,1,1,1,2024-01-15
-2,2,2,2,2024-01-16
-3,1,3,1,2024-01-17""",
-    "Library Management": """Table: books
-book_id,title,author,isbn,available
-1,Python Programming,John Author,978-1234567890,1
-2,Data Science,Jane Writer,978-0987654321,0
-3,Web Development,Bob Coder,978-1122334455,1
+    CREATE TABLE orders (
+        order_id INTEGER PRIMARY KEY,
+        customer_id INTEGER,
+        product_id INTEGER,
+        quantity INTEGER,
+        order_date DATE,
+        FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+        FOREIGN KEY (product_id) REFERENCES products(product_id)
+    );
 
-Table: members
-member_id,name,email,join_date
-1,Alice Johnson,alice@email.com,2023-01-01
-2,Bob Wilson,bob@email.com,2023-02-15
+    INSERT INTO customers (customer_id, name, email, phone) VALUES 
+    (1, 'John Doe', 'john@email.com', '123-456-7890'),
+    (2, 'Jane Smith', 'jane@email.com', '098-765-4321');
 
-Table: loans
-loan_id,book_id,member_id,loan_date,return_date
-1,2,1,2024-01-10,NULL
-2,1,2,2024-01-05,2024-01-15""",
-    "Sales Database": """Table: salespeople
-salesperson_id,name,region
-1,Tom Wilson,North
-2,Lisa Brown,South
-3,Mike Johnson,East
+    INSERT INTO products (product_id, name, price, category) VALUES 
+    (1, 'Laptop', 999.99, 'Electronics'),
+    (2, 'Book', 29.99, 'Education'),
+    (3, 'Phone', 699.99, 'Electronics');
 
-Table: sales
-sale_id,salesperson_id,amount,sale_date
-1,1,15000,2024-01-15
-2,2,22000,2024-01-16
-3,1,18000,2024-01-17""",
-    "HR Management": """Table: employees
-employee_id,name,department,salary,hire_date
-1,Alice Smith,Engineering,75000,2023-01-15
-2,Bob Johnson,Sales,65000,2023-02-01
-3,Carol Davis,Marketing,70000,2023-03-10
+    INSERT INTO orders (order_id, customer_id, product_id, quantity, order_date) VALUES 
+    (1, 1, 1, 1, '2024-01-15'),
+    (2, 2, 2, 2, '2024-01-16'),
+    (3, 1, 3, 1, '2024-01-17');""",
 
-Table: departments
-department_id,department_name,manager_id
-1,Engineering,1
-2,Sales,2
-3,Marketing,3
+    "Library Management": """DB_NAME: library
+    CREATE TABLE books (
+        book_id INTEGER PRIMARY KEY,
+        title TEXT,
+        author TEXT,
+        isbn TEXT,
+        available INTEGER
+    );
 
-Table: projects
-project_id,project_name,department_id,budget,start_date
-1,AI Platform,1,100000,2024-01-01
-2,Sales Campaign,2,50000,2024-02-01""",
-    "School Database": """Table: students
-student_id,name,grade,age
-1,Emma Wilson,10,16
-2,Liam Brown,11,17
-3,Olivia Davis,9,15
+    CREATE TABLE members (
+        member_id INTEGER PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        join_date DATE
+    );
 
-Table: courses
-course_id,course_name,teacher,credits
-1,Mathematics,Mr. Smith,3
-2,English,Ms. Johnson,3
-3,Science,Dr. Brown,4
+    CREATE TABLE loans (
+        loan_id INTEGER PRIMARY KEY,
+        book_id INTEGER,
+        member_id INTEGER,
+        loan_date DATE,
+        return_date DATE,
+        FOREIGN KEY (book_id) REFERENCES books(book_id),
+        FOREIGN KEY (member_id) REFERENCES members(member_id)
+    );
 
-Table: enrollments
-enrollment_id,student_id,course_id,grade,semester
-1,1,1,A,Fall2024
-2,1,2,B+,Fall2024
-3,2,1,A-,Fall2024""",
+    INSERT INTO books (book_id, title, author, isbn, available) VALUES 
+    (1, 'Python Programming', 'John Author', '978-1234567890', 1),
+    (2, 'Data Science', 'Jane Writer', '978-0987654321', 0),
+    (3, 'Web Development', 'Bob Coder', '978-1122334455', 1);
+
+    INSERT INTO members (member_id, name, email, join_date) VALUES 
+    (1, 'Alice Johnson', 'alice@email.com', '2023-01-01'),
+    (2, 'Bob Wilson', 'bob@email.com', '2023-02-15');
+
+    INSERT INTO loans (loan_id, book_id, member_id, loan_date, return_date) VALUES 
+    (1, 2, 1, '2024-01-10', NULL),
+    (2, 1, 2, '2024-01-05', '2024-01-15');""",
+
+    "Sales Database": """DB_NAME: sales
+    CREATE TABLE salespeople (
+        salesperson_id INTEGER PRIMARY KEY,
+        name TEXT,
+        region TEXT
+    );
+
+    CREATE TABLE sales (
+        sale_id INTEGER PRIMARY KEY,
+        salesperson_id INTEGER,
+        amount REAL,
+        sale_date DATE,
+        FOREIGN KEY (salesperson_id) REFERENCES salespeople(salesperson_id)
+    );
+
+    INSERT INTO salespeople (salesperson_id, name, region) VALUES 
+    (1, 'Tom Wilson', 'North'),
+    (2, 'Lisa Brown', 'South'),
+    (3, 'Mike Johnson', 'East');
+
+    INSERT INTO sales (sale_id, salesperson_id, amount, sale_date) VALUES 
+    (1, 1, 15000, '2024-01-15'),
+    (2, 2, 22000, '2024-01-16'),
+    (3, 1, 18000, '2024-01-17');""",
+
+    "HR Management": """DB_NAME: hr_system
+    CREATE TABLE employees (
+        employee_id INTEGER PRIMARY KEY,
+        name TEXT,
+        department TEXT,
+        salary REAL,
+        hire_date DATE
+    );
+
+    CREATE TABLE departments (
+        department_id INTEGER PRIMARY KEY,
+        department_name TEXT,
+        manager_id INTEGER,
+        FOREIGN KEY (manager_id) REFERENCES employees(employee_id)
+    );
+
+    CREATE TABLE projects (
+        project_id INTEGER PRIMARY KEY,
+        project_name TEXT,
+        department_id INTEGER,
+        budget REAL,
+        start_date DATE,
+        FOREIGN KEY (department_id) REFERENCES departments(department_id)
+    );
+
+    INSERT INTO employees (employee_id, name, department, salary, hire_date) VALUES 
+    (1, 'Alice Smith', 'Engineering', 75000, '2023-01-15'),
+    (2, 'Bob Johnson', 'Sales', 65000, '2023-02-01'),
+    (3, 'Carol Davis', 'Marketing', 70000, '2023-03-10');
+
+    INSERT INTO departments (department_id, department_name, manager_id) VALUES 
+    (1, 'Engineering', 1),
+    (2, 'Sales', 2),
+    (3, 'Marketing', 3);
+
+    INSERT INTO projects (project_id, project_name, department_id, budget, start_date) VALUES 
+    (1, 'AI Platform', 1, 100000, '2024-01-01'),
+    (2, 'Sales Campaign', 2, 50000, '2024-02-01');""",
+
+    "School Database": """DB_NAME: school
+    CREATE TABLE students (
+        student_id INTEGER PRIMARY KEY,
+        name TEXT,
+        grade INTEGER,
+        age INTEGER
+    );
+
+    CREATE TABLE courses (
+        course_id INTEGER PRIMARY KEY,
+        course_name TEXT,
+        teacher TEXT,
+        credits INTEGER
+    );
+
+    CREATE TABLE enrollments (
+        enrollment_id INTEGER PRIMARY KEY,
+        student_id INTEGER,
+        course_id INTEGER,
+        grade TEXT,
+        semester TEXT,
+        FOREIGN KEY (student_id) REFERENCES students(student_id),
+        FOREIGN KEY (course_id) REFERENCES courses(course_id)
+    );
+
+    INSERT INTO students (student_id, name, grade, age) VALUES 
+    (1, 'Emma Wilson', 10, 16),
+    (2, 'Liam Brown', 11, 17),
+    (3, 'Olivia Davis', 9, 15);
+
+    INSERT INTO courses (course_id, course_name, teacher, credits) VALUES 
+    (1, 'Mathematics', 'Mr. Smith', 3),
+    (2, 'English', 'Ms. Johnson', 3),
+    (3, 'Science', 'Dr. Brown', 4);
+
+    INSERT INTO enrollments (enrollment_id, student_id, course_id, grade, semester) VALUES 
+    (1, 1, 1, 'A', 'Fall2024'),
+    (2, 1, 2, 'B+', 'Fall2024'),
+    (3, 2, 1, 'A-', 'Fall2024');""",
 }
 
 
@@ -445,8 +682,8 @@ def create_interface():
 
                     with gr.Row():
                         schema_input = gr.Textbox(
-                            label="Database Schema (CSV format)",
-                            placeholder="Paste your database schema here...",
+                            label="Database Schema (SQL format)",
+                            placeholder="Paste your database schema here (SQL CREATE TABLE and INSERT statements)...",
                             lines=10,
                             max_lines=15,
                         )
@@ -494,8 +731,9 @@ def create_interface():
                 <div class="example-box">
                     <h4>📝 Usage Tips</h4>
                     <ul>
-                        <li>Provide clear database schema in CSV format</li>
-                        <li>Include table names, columns, and sample data</li>
+                        <li>Provide clear database schema in SQL format</li>
+                        <li>Include CREATE TABLE and INSERT statements</li>
+                        <li>Use DB_NAME: prefix to specify database name</li>
                         <li>Ask specific questions about your data</li>
                         <li>Review generated SQL before executing</li>
                     </ul>
@@ -506,13 +744,17 @@ def create_interface():
                 gr.HTML("""
                 <div class="example-box">
                     <h4>📊 Schema Format</h4>
-                    <p><strong>Format:</strong> Table: table_name<br>
-                    column1,column2,column3<br>
-                    value1,value2,value3</p>
+                    <p><strong>Format:</strong><br>
+                    DB_NAME: your_database_name<br>
+                    CREATE TABLE table_name (...);<br>
+                    INSERT INTO table_name VALUES (...);</p>
                     <p><strong>Example:</strong><br>
-                    Table: users<br>
-                    id,name,email<br>
-                    1,John,john@email.com</p>
+                    DB_NAME: university<br>
+                    CREATE TABLE students (<br>
+                    &nbsp;&nbsp;id INTEGER PRIMARY KEY,<br>
+                    &nbsp;&nbsp;name TEXT<br>
+                    );<br>
+                    INSERT INTO students VALUES (1, 'John');</p>
                 </div>
                 """)
 

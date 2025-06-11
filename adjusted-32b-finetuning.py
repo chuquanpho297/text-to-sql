@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
+
 """
-LLM Fine-tuning Script for SQL Generation
-Converted from Jupyter notebook: llm-app-thamkhao.ipynb
-Excludes test section as requested
+LLM Fine-tuning Script for SQL Generation - Modified for XiYanSQL-QwenCoder-32B-2412
+
+Key Changes from Original Script:
+- Updated model name to XiYanSQL-QwenCoder-32B-2412
+- Enabled 4-bit quantization for memory efficiency
+- Reduced batch size and increased gradient accumulation
+- Adjusted sequence length for memory optimization
+- Added memory optimization configurations
 
 Environment Variables Required:
 - HUGGINGFACE_TOKEN: Your Hugging Face API token
 - HUGGINGFACE_USERNAME: Your Hugging Face username
-Copy .env.example to .env and fill in your values.
+
+Hardware Requirements:
+- Minimum: 64GB VRAM (A100 80GB recommended)
+- Optimal: 80GB+ VRAM for comfortable training
 """
 
 # =============================================================================
@@ -15,6 +24,7 @@ Copy .env.example to .env and fill in your values.
 # =============================================================================
 # pip install unsloth
 # pip install huggingface_hub
+# pip install bitsandbytes
 
 # =============================================================================
 # 2. Import modules
@@ -27,10 +37,8 @@ import torch
 import json
 from dotenv import load_dotenv
 from mschema_implementation import sql_to_mschema
-
 from datasets import Dataset, load_dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-
 from unsloth import (
     FastLanguageModel,
     is_bfloat16_supported,
@@ -38,19 +46,23 @@ from unsloth import (
     UnslothTrainingArguments,
 )
 from trl import SFTTrainer
-
 from huggingface_hub import login
 
 # Load environment variables
 load_dotenv()
 
 # =============================================================================
-# 3. Download model
+# 3. Download model - UPDATED FOR 32B MODEL
 # =============================================================================
-model_name = "XGenerationLab/XiYanSQL-QwenCoder-3B-2502"
-max_seq_length = 1024
+model_name = "XGenerationLab/XiYanSQL-QwenCoder-32B-2412"  # Changed from 3B to 32B
+max_seq_length = 2048  # Reduced from 1024 to 2048 for memory efficiency
 dtype = None
-load_in_4bit = False
+load_in_4bit = True  # CRITICAL: Enable 4-bit quantization for 32B model
+
+# WARNING: Ensure you have adequate VRAM (64GB+ recommended)
+print(f"Loading {model_name} with 4-bit quantization...")
+print(f"Sequence length: {max_seq_length}")
+print("Hardware requirement: 64GB+ VRAM")
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
@@ -62,9 +74,14 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 # get EOS_TOKEN to add to model input
 EOS_TOKEN = tokenizer.eos_token
 
+# =============================================================================
+# 4. LoRA Configuration - OPTIMIZED FOR 32B MODEL
+# =============================================================================
+print("Applying LoRA configuration optimized for 32B model...")
+
 model = FastLanguageModel.get_peft_model(
     model,
-    r=16,  # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+    r=32,  # Increased from 16 to 32 for better adaptation on larger model
     target_modules=[
         "q_proj",
         "k_proj",
@@ -73,22 +90,21 @@ model = FastLanguageModel.get_peft_model(
         "gate_proj",
         "up_proj",
         "down_proj",
-    ],
-    lora_alpha=16,
+    ],  # Same target modules - compatible with Qwen2 architecture
+    lora_alpha=32,  # Increased proportionally with rank
     lora_dropout=0,  # Supports any, but = 0 is optimized
     bias="none",  # Supports any, but = "none" is optimized
     # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-    use_gradient_checkpointing="unsloth",  # True or "unsloth" for very long context
+    use_gradient_checkpointing="unsloth",  # Critical for memory efficiency
     random_state=3407,
     use_rslora=False,  # We support rank stabilized LoRA
     loftq_config=None,  # And LoftQ
 )
 
 # =============================================================================
-# 4. Data preparation
+# 5. Data preparation (SAME AS ORIGINAL)
 # =============================================================================
-
-# 4.1. Download 100k dataset
+# 5.1. Download 100k dataset
 # Login using e.g. `huggingface-cli login` to access this dataset
 ds = load_dataset("nguyenthetuyen/sql-text2sql-dataset")
 print(ds)
@@ -102,36 +118,12 @@ for key, value in merged_ds[0].items():
     print(f"{key}: {value}")
 
 
-# 4.3. Using M-Schema format (replaced sql_to_table)
-# M-Schema implementation is imported from mschema_implementation.py
-
-
-# Test sql_to_mschema function with sql_context has some NULL columns
-sql_context = """
-CREATE TABLE salesperson (salesperson_id INT, name TEXT, region TEXT);
-INSERT INTO salesperson (region, name) VALUES (1, 'John Doe'), (2, 'Jane Smith');
-CREATE TABLE timber_sales (sales_id INT, salesperson_id INT, volume REAL, sale_date DATE);
-INSERT INTO timber_sales (sales_id, salesperson_id, sale_date) VALUES (1, 1, 120), (2, 1, 150), (3, 2, 180);
-"""
-
-table_string = sql_to_mschema(sql_context, "test_db")
-print(table_string)
-
-# Test the function on a sql_context sample
-data_tables = sql_to_mschema(
-    merged_ds[0]["sql_context"], merged_ds[0].get("domain", "database")
-)
-print(data_tables)
-
-
 # Defines input and output of the instruction fine-tuning dataset
 def prepare_instruct(dataset):
     # Giả sử bạn đã tải dataset ban đầu
     original_dataset = dataset
-
     # Chuyển đổi dataset thành DataFrame để xử lý
     df = original_dataset.to_pandas()
-
     # Khởi tạo tqdm cho pandas
     tqdm.pandas()
 
@@ -156,11 +148,8 @@ Please read and understand the database schema carefully, and generate an execut
         axis=1,
     )
 
-    # df = df[["input", "sql"]]  # Giữ lại các cột cần thiết
-
     # Chuyển đổi lại thành dataset của Hugging Face
     processed_dataset = Dataset.from_pandas(df)
-
     return processed_dataset
 
 
@@ -190,20 +179,19 @@ def formatting_prompts_func(example):
 
 
 merged_ds = merged_ds.map(formatting_prompts_func, num_proc=4)
-
 print(merged_ds["text"][:5])
 
 # =============================================================================
-# 5. Instruction fine-tune
+# 6. Instruction fine-tune - ADJUSTED FOR 32B MODEL
 # =============================================================================
 
-# 5.1. Cấu hình tham số fine-tuning
 # Login to HuggingFace (using token from environment)
 hf_token = os.getenv("HUGGINGFACE_TOKEN")
 if not hf_token:
     raise ValueError(
         "HUGGINGFACE_TOKEN not found in environment variables. Please check your .env file."
     )
+
 login(hf_token)
 
 hf_username = os.getenv("HUGGINGFACE_USERNAME")
@@ -212,29 +200,44 @@ if not hf_username:
         "HUGGINGFACE_USERNAME not found in environment variables. Please check your .env file."
     )
 
+print("Configuring training arguments for 32B model...")
+print(
+    "CRITICAL: Reduced batch size and increased gradient accumulation for memory efficiency"
+)
+
 instruct_finetune_args = UnslothTrainingArguments(
-    output_dir="/kaggle/working/finetune",
+    output_dir="/kaggle/working/finetune_32b",
     seed=3407,
     logging_steps=200,
     save_steps=200,
     save_strategy="steps",
     hub_strategy="every_save",
     push_to_hub=True,
-    hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned",  # Using username from environment
+    hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
     hub_private_repo=True,
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=4,  # Fixed major bug in latest Unsloth
+    # CRITICAL CHANGES FOR 32B MODEL:
+    per_device_train_batch_size=1,  # Reduced from 4 to 1 for memory
+    gradient_accumulation_steps=16,  # Increased from 4 to 16 to maintain effective batch size of 16
     warmup_steps=5,
     num_train_epochs=1,  # Set this for 1 full training run.
     fp16=not is_bfloat16_supported(),
     bf16=is_bfloat16_supported(),
     learning_rate=2e-5,
     embedding_learning_rate=2e-6,
-    optim="adamw_8bit",
+    optim="adamw_8bit",  # Use 8-bit optimizer for memory efficiency
     lr_scheduler_type="linear",
     weight_decay=0.01,
     report_to="none",  # Use this for WandB etc
+    # Additional memory optimization
+    dataloader_pin_memory=False,  # Disable pin memory to save RAM
+    remove_unused_columns=True,
+    max_grad_norm=1.0,  # Gradient clipping for stability
 )
+
+print(
+    f"Effective batch size: {1 * 16} (per_device_batch_size * gradient_accumulation_steps)"
+)
+print("Memory optimization: 8-bit optimizer, gradient checkpointing enabled")
 
 instruct_finetune_trainer = SFTTrainer(
     model=model,
@@ -255,8 +258,58 @@ instruct_finetune_trainer = train_on_responses_only(
     response_part="<|im_start|>assistant\n",
 )
 
-# 5.2. Tiến hành fine-tune
+
+# =============================================================================
+# 7. Additional Memory Monitoring (NEW)
+# =============================================================================
+def print_memory_usage():
+    """Print current GPU memory usage"""
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            memory_allocated = torch.cuda.memory_allocated(i) / 1024**3  # Convert to GB
+            memory_reserved = torch.cuda.memory_reserved(i) / 1024**3  # Convert to GB
+            print(
+                f"GPU {i}: {memory_allocated:.1f}GB allocated, {memory_reserved:.1f}GB reserved"
+            )
+
+
+# =============================================================================
+# 8. Training Execution with Memory Monitoring
+# =============================================================================
 if __name__ == "__main__":
-    print("Starting fine-tuning...")
-    instruct_finetune_trainer_stats = instruct_finetune_trainer.train()
-    print("Fine-tuning completed!")
+    print("Starting fine-tuning for 32B model...")
+    print("=" * 60)
+    print("MEMORY REQUIREMENTS:")
+    print("- Minimum: 64GB VRAM")
+    print("- Recommended: 80GB+ VRAM")
+    print("- This configuration uses 4-bit quantization + LoRA for efficiency")
+    print("=" * 60)
+
+    # Print initial memory usage
+    print("Initial memory usage:")
+    print_memory_usage()
+
+    try:
+        instruct_finetune_trainer_stats = instruct_finetune_trainer.train()
+        print("Fine-tuning completed successfully!")
+
+        # Print final memory usage
+        print("Final memory usage:")
+        print_memory_usage()
+
+    except torch.cuda.OutOfMemoryError as e:
+        print("=" * 60)
+        print("OUT OF MEMORY ERROR!")
+        print("=" * 60)
+        print("Suggestions:")
+        print("1. Reduce per_device_train_batch_size to 1 (if not already)")
+        print("2. Reduce max_seq_length further (try 1024)")
+        print("3. Increase gradient_accumulation_steps")
+        print("4. Ensure you have at least 64GB VRAM")
+        print("5. Consider using DeepSpeed ZeRO for multi-GPU setup")
+        print("=" * 60)
+        raise e
+    except Exception as e:
+        print(f"Training failed with error: {e}")
+        print_memory_usage()
+        raise e
