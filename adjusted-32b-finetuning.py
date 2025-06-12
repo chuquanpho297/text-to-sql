@@ -361,13 +361,13 @@ if not hf_username:
 
 # Test repository access
 print(
-    f"🔍 Testing repository access for: {hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
+    f"🔍 Testing repository access for: {hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned-{gpu_config['setup_type'].replace('Single-', '').replace('-', '_')}"
 )
 api = HfApi()
 try:
     # Test if we can create/access the repository
     repo_url = api.create_repo(
-        f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
+        f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned-{gpu_config['setup_type'].replace('Single-', '').replace('-', '_')}",
         private=True,
         exist_ok=True,  # Don't fail if repo already exists
         token=hf_token,
@@ -419,7 +419,7 @@ instruct_finetune_args = UnslothTrainingArguments(
     save_strategy="steps",
     hub_strategy="every_save",  # Push to HF every time we save (every 2 steps)
     push_to_hub=True,
-    hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
+    hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned-{gpu_config['setup_type'].replace('Single-', '').replace('-', '_')}",
     hub_private_repo=True,
     # OPTIMIZED FOR SINGLE GPU (H100 OR A100):
     per_device_train_batch_size=per_device_batch_size,  # Dynamic based on GPU type
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         instruct_finetune_trainer_stats = instruct_finetune_trainer.train()
         print("Fine-tuning completed successfully!")
         print(
-            f"🔗 Model automatically uploaded to: https://huggingface.co/{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
+            f"🔗 Model automatically uploaded to: https://huggingface.co/{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned-{gpu_config['setup_type'].replace('Single-', '').replace('-', '_')}"
         )
 
         # Print final memory usage

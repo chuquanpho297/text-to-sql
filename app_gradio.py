@@ -187,26 +187,31 @@ def csv_to_sql_context(csv_schema):
     return "\n".join(sql_parts)
 
 
-def parse_sql_schema(schema_text):
+def parse_sql_schema(schema_text, db_name_input=None):
     """Parse SQL schema text to extract database name and SQL context"""
     schema_text = schema_text.strip()
-    
-    # Extract database name if present
-    db_name = "database"  # default
-    sql_context = schema_text
-    
-    if schema_text.startswith("DB_NAME:"):
-        lines = schema_text.split('\n')
-        first_line = lines[0].strip()
-        if first_line.startswith("DB_NAME:"):
-            db_name = first_line.replace("DB_NAME:", "").strip()
-            # Remove the DB_NAME line and rejoin the rest
-            sql_context = '\n'.join(lines[1:]).strip()
-    
+
+    # Use provided db_name_input if available, otherwise extract from schema
+    if db_name_input and db_name_input.strip():
+        db_name = db_name_input.strip()
+        sql_context = schema_text
+    else:
+        # Extract database name if present in schema text
+        db_name = "database"  # default
+        sql_context = schema_text
+
+        if schema_text.startswith("DB_NAME:"):
+            lines = schema_text.split("\n")
+            first_line = lines[0].strip()
+            if first_line.startswith("DB_NAME:"):
+                db_name = first_line.replace("DB_NAME:", "").strip()
+                # Remove the DB_NAME line and rejoin the rest
+                sql_context = "\n".join(lines[1:]).strip()
+
     return db_name, sql_context
 
 
-def generate_sql(schema_text, question, progress=gr.Progress()):
+def generate_sql(db_name_input, schema_text, question, progress=gr.Progress()):
     """Generate SQL query using LangChain with the fine-tuned model"""
     global llm_chain
 
@@ -224,15 +229,19 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
         # Check if input is in new SQL format or old CSV format
         progress(0.3, desc="Converting schema to M-Schema format...")
-        
+
         if schema_text.strip().startswith("DB_NAME:") or "CREATE TABLE" in schema_text:
             # New SQL format
-            db_name, sql_context = parse_sql_schema(schema_text.strip())
+            db_name, sql_context = parse_sql_schema(schema_text.strip(), db_name_input)
         else:
             # Old CSV format - convert to SQL first
             sql_context = csv_to_sql_context(schema_text.strip())
-            db_name = "database"
-            
+            db_name = (
+                db_name_input.strip()
+                if db_name_input and db_name_input.strip()
+                else "database"
+            )
+
             if not sql_context:
                 return "❌ Failed to parse the schema. Please check the format."
 
@@ -317,8 +326,9 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
 # Example schemas
 EXAMPLE_SCHEMAS = {
-    "E-commerce Database": """DB_NAME: ecommerce
-    CREATE TABLE customers (
+    "E-commerce Database": {
+        "db_name": "ecommerce",
+        "schema": """CREATE TABLE customers (
         customer_id INTEGER PRIMARY KEY,
         name TEXT,
         email TEXT,
@@ -355,9 +365,10 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 1, 1, '2024-01-15'),
     (2, 2, 2, 2, '2024-01-16'),
     (3, 1, 3, 1, '2024-01-17');""",
-
-    "Library Management": """DB_NAME: library
-    CREATE TABLE books (
+    },
+    "Library Management": {
+        "db_name": "library",
+        "schema": """CREATE TABLE books (
         book_id INTEGER PRIMARY KEY,
         title TEXT,
         author TEXT,
@@ -394,9 +405,10 @@ EXAMPLE_SCHEMAS = {
     INSERT INTO loans (loan_id, book_id, member_id, loan_date, return_date) VALUES 
     (1, 2, 1, '2024-01-10', NULL),
     (2, 1, 2, '2024-01-05', '2024-01-15');""",
-
-    "Sales Database": """DB_NAME: sales
-    CREATE TABLE salespeople (
+    },
+    "Sales Database": {
+        "db_name": "sales",
+        "schema": """CREATE TABLE salespeople (
         salesperson_id INTEGER PRIMARY KEY,
         name TEXT,
         region TEXT
@@ -419,9 +431,10 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 15000, '2024-01-15'),
     (2, 2, 22000, '2024-01-16'),
     (3, 1, 18000, '2024-01-17');""",
-
-    "HR Management": """DB_NAME: hr_system
-    CREATE TABLE employees (
+    },
+    "HR Management": {
+        "db_name": "hr_system",
+        "schema": """CREATE TABLE employees (
         employee_id INTEGER PRIMARY KEY,
         name TEXT,
         department TEXT,
@@ -458,9 +471,10 @@ EXAMPLE_SCHEMAS = {
     INSERT INTO projects (project_id, project_name, department_id, budget, start_date) VALUES 
     (1, 'AI Platform', 1, 100000, '2024-01-01'),
     (2, 'Sales Campaign', 2, 50000, '2024-02-01');""",
-
-    "School Database": """DB_NAME: school
-    CREATE TABLE students (
+    },
+    "School Database": {
+        "db_name": "school",
+        "schema": """CREATE TABLE students (
         student_id INTEGER PRIMARY KEY,
         name TEXT,
         grade INTEGER,
@@ -498,12 +512,16 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 1, 'A', 'Fall2024'),
     (2, 1, 2, 'B+', 'Fall2024'),
     (3, 2, 1, 'A-', 'Fall2024');""",
+    },
 }
 
 
 def load_example_schema(example_name):
     """Load an example schema"""
-    return EXAMPLE_SCHEMAS.get(example_name, "")
+    example_data = EXAMPLE_SCHEMAS.get(example_name, {})
+    if example_data:
+        return example_data.get("db_name", ""), example_data.get("schema", "")
+    return "", ""
 
 
 def clear_memory():
@@ -680,19 +698,29 @@ def create_interface():
                 with gr.Group():
                     gr.HTML("<h3>💬 Generate SQL Query</h3>")
 
-                    with gr.Row():
-                        schema_input = gr.Textbox(
-                            label="Database Schema (SQL format)",
-                            placeholder="Paste your database schema here (SQL CREATE TABLE and INSERT statements)...",
-                            lines=10,
-                            max_lines=15,
-                        )
-                        question_input = gr.Textbox(
-                            label="Your Question",
-                            placeholder="What data do you want to query?",
-                            lines=5,
-                            max_lines=10,
-                        )
+                    # Database Name input
+                    db_name_input = gr.Textbox(
+                        label="Database Name",
+                        placeholder="Enter database name (e.g., ecommerce, library, sales...)",
+                        lines=1,
+                        value="",
+                    )
+
+                    # Schema input
+                    schema_input = gr.Textbox(
+                        label="Database Schema (SQL format)",
+                        placeholder="Paste your database schema here (SQL CREATE TABLE and INSERT statements only, no DB_NAME prefix needed)...",
+                        lines=8,
+                        max_lines=12,
+                    )
+
+                    # Question input
+                    question_input = gr.Textbox(
+                        label="Your Question",
+                        placeholder="What data do you want to query?",
+                        lines=3,
+                        max_lines=5,
+                    )
 
                     generate_btn = gr.Button(
                         "🚀 Generate SQL", variant="primary", size="lg"
@@ -731,9 +759,9 @@ def create_interface():
                 <div class="example-box">
                     <h4>📝 Usage Tips</h4>
                     <ul>
-                        <li>Provide clear database schema in SQL format</li>
-                        <li>Include CREATE TABLE and INSERT statements</li>
-                        <li>Use DB_NAME: prefix to specify database name</li>
+                        <li>Enter a descriptive database name</li>
+                        <li>Provide clear database schema with CREATE TABLE and INSERT statements</li>
+                        <li>No need to include DB_NAME: prefix in schema</li>
                         <li>Ask specific questions about your data</li>
                         <li>Review generated SQL before executing</li>
                     </ul>
@@ -743,13 +771,12 @@ def create_interface():
                 # Schema format guide
                 gr.HTML("""
                 <div class="example-box">
-                    <h4>📊 Schema Format</h4>
-                    <p><strong>Format:</strong><br>
-                    DB_NAME: your_database_name<br>
+                    <h4>📊 Input Format</h4>
+                    <p><strong>Database Name:</strong> ecommerce</p>
+                    <p><strong>Schema Format:</strong><br>
                     CREATE TABLE table_name (...);<br>
                     INSERT INTO table_name VALUES (...);</p>
-                    <p><strong>Example:</strong><br>
-                    DB_NAME: university<br>
+                    <p><strong>Example Schema:</strong><br>
                     CREATE TABLE students (<br>
                     &nbsp;&nbsp;id INTEGER PRIMARY KEY,<br>
                     &nbsp;&nbsp;name TEXT<br>
@@ -780,46 +807,55 @@ def create_interface():
 
         generate_btn.click(
             generate_sql,
-            inputs=[schema_input, question_input],
+            inputs=[db_name_input, schema_input, question_input],
             outputs=sql_output,
             show_progress=True,
         )
 
         # Clear function
         def clear_all():
-            return "", "", ""
+            return "", "", "", ""
 
-        clear_btn.click(clear_all, outputs=[schema_input, question_input, sql_output])
+        clear_btn.click(
+            clear_all, outputs=[db_name_input, schema_input, question_input, sql_output]
+        )
 
         load_example_btn.click(
-            load_example_schema, inputs=example_dropdown, outputs=schema_input
+            load_example_schema,
+            inputs=example_dropdown,
+            outputs=[db_name_input, schema_input],
         )
 
         # Example interactions
         gr.Examples(
             examples=[
                 [
-                    EXAMPLE_SCHEMAS["E-commerce Database"],
+                    "ecommerce",
+                    EXAMPLE_SCHEMAS["E-commerce Database"]["schema"],
                     "Show me the total revenue by product category",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["Library Management"],
+                    "library",
+                    EXAMPLE_SCHEMAS["Library Management"]["schema"],
                     "Find all books that are currently borrowed",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["Sales Database"],
+                    "sales",
+                    EXAMPLE_SCHEMAS["Sales Database"]["schema"],
                     "Which salesperson has the highest total sales?",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["HR Management"],
+                    "hr_system",
+                    EXAMPLE_SCHEMAS["HR Management"]["schema"],
                     "List all employees in Engineering department with their salaries",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["School Database"],
+                    "school",
+                    EXAMPLE_SCHEMAS["School Database"]["schema"],
                     "Show average grade for each course",
                 ],
             ],
-            inputs=[schema_input, question_input],
+            inputs=[db_name_input, schema_input, question_input],
             outputs=sql_output,
             fn=generate_sql,
             cache_examples=False,
