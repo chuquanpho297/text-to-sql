@@ -535,42 +535,9 @@ if __name__ == "__main__":
     try:
         instruct_finetune_trainer_stats = instruct_finetune_trainer.train()
         print("Fine-tuning completed successfully!")
-
-        # EXPLICIT MODEL SAVING AND PUSHING
-        print("=" * 60)
-        print("SAVING MODEL TO HUGGING FACE...")
-        print("=" * 60)
-
-        try:
-            # Save model locally first
-            print("🔄 Saving model locally...")
-            model.save_pretrained(f"/kaggle/working/finetune_32b/final_model")
-            tokenizer.save_pretrained(f"/kaggle/working/finetune_32b/final_model")
-            print("✅ Model saved locally")
-
-            # Push to Hugging Face Hub
-            print("🔄 Pushing model to Hugging Face Hub...")
-            model.push_to_hub(
-                f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
-                private=True,
-                token=hf_token,
-            )
-            tokenizer.push_to_hub(
-                f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
-                private=True,
-                token=hf_token,
-            )
-            print("✅ Model successfully pushed to Hugging Face!")
-            print(
-                f"🔗 Model URL: https://huggingface.co/{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
-            )
-
-        except Exception as save_error:
-            print(f"❌ Error saving to Hugging Face: {save_error}")
-            print("💡 Check your HUGGINGFACE_TOKEN and permissions")
-            print(
-                "📁 Model is still saved locally at: /kaggle/working/finetune_32b/final_model"
-            )
+        print(
+            f"🔗 Model automatically uploaded to: https://huggingface.co/{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
+        )
 
         # Print final memory usage
         print("Final memory usage:")
