@@ -15,6 +15,7 @@ A modern web interface for generating SQL queries from natural language using a 
 ## Quick Start
 
 ### Method 1: Direct Run
+
 ```bash
 # Install dependencies
 pip install -r requirements.txt
@@ -28,6 +29,7 @@ python app_gradio.py
 ```
 
 ### Method 2: Docker
+
 ```bash
 # Build and run
 docker-compose up --build
@@ -38,6 +40,7 @@ docker-compose up --build
 ## Environment Variables
 
 Create a `.env` file with:
+
 ```
 HUGGINGFACE_TOKEN=your_token_here
 HUGGINGFACE_USERNAME=your_username_here
@@ -61,6 +64,7 @@ HUGGINGFACE_USERNAME=your_username_here
 ## 📊 Example Schemas
 
 The interface includes several pre-loaded examples:
+
 - **E-commerce Database**: Customers, products, and orders
 - **Library Management**: Books, members, and loans
 - **Sales Database**: Salespeople and sales records
@@ -68,11 +72,16 @@ The interface includes several pre-loaded examples:
 ## 🔧 Configuration
 
 ### Environment Variables
-- `HUGGINGFACE_TOKEN`: Your Hugging Face API token (if model is private)
-- `HUGGINGFACE_USERNAME`: Your Hugging Face username
+
+- `HUGGINGFACE_TOKEN`: Your Hugging Face API token (required if the model is private or for uploading models/datasets).
+- `HUGGINGFACE_USERNAME`: Your Hugging Face username (required for uploading models/datasets).
+- `WANDB_PROJECT` (Optional): Your Weights & Biases project name for logging fine-tuning experiments (e.g., `xiyanSQL-32b-finetuning`). Used by `adjusted-32b-finetuning.py`.
+- `WANDB_ENTITY` (Optional): Your Weights & Biases entity (username or team name). Used by `adjusted-32b-finetuning.py`.
 
 ### Model Settings
+
 The model is configured with these default settings:
+
 - `max_new_tokens`: 256
 - `temperature`: 0.1
 - `top_p`: 0.95
@@ -82,15 +91,19 @@ You can modify these in `app_gradio.py` for different generation behavior.
 ## 🌐 Deployment Options
 
 ### Local Development
+
 ```bash
 python app_gradio.py
 ```
 
 ### Public Sharing
+
 The Gradio app includes `share=True` which creates a public URL for easy sharing.
 
 ### Production Deployment
+
 For production deployment, consider:
+
 - Using a proper WSGI server (e.g., Gunicorn)
 - Setting up reverse proxy (e.g., Nginx)
 - Configuring proper environment variables
@@ -99,6 +112,7 @@ For production deployment, consider:
 ## 🎨 Interface Features
 
 ### Gradio Interface
+
 - 🎨 Modern, responsive design
 - 📋 Integrated example schemas
 - ⚡ Quick model loading
@@ -109,26 +123,78 @@ For production deployment, consider:
 ## 🔍 Troubleshooting
 
 ### Model Loading Issues
+
 - Ensure you have sufficient RAM/VRAM
 - Check your Hugging Face token if the model is private
 - Try using CPU inference if GPU memory is insufficient
 
 ### Performance Optimization
+
 - Use GPU for faster inference
 - Adjust batch size based on available memory
 - Consider using quantized models for lower memory usage
 
 ### Common Errors
+
 - **Token Error**: Make sure your `.env` file contains valid `HUGGINGFACE_TOKEN`
 - **Memory Error**: Try closing other applications or use CPU inference
 - **Import Error**: Ensure all requirements are installed with `pip install -r requirements.txt`
 
-## 📝 Model Information
+## 📁 Project Structure
 
-- **Model**: hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned
-- **Base Model**: XiYanSQL-QwenCoder-3B-2502
-- **Fine-tuned on**: 100k SQL text-to-SQL dataset
-- **Purpose**: Natural language to SQL query conversion
+### Core Application Files
+
+- **`app_gradio.py`** - Main Gradio web interface for the SQL generator
+  - Provides a modern web UI for natural language to SQL conversion
+  - Handles model loading, tokenization, and inference
+  - Includes pre-loaded database schema examples
+  - Features responsive design with sharing capabilities
+
+- **`mschema_implementation.py`** - M-Schema format converter
+  - Converts SQL DDL statements to M-Schema format for enhanced training
+  - Parses CREATE TABLE and INSERT statements
+  - Formats database schemas according to XiYan-SQL M-Schema specification
+  - Used by both the fine-tuning script and the main application
+
+### Training and Fine-tuning
+
+- **`adjusted-32b-finetuning.py`** - Fine-tuning script for XiYanSQL models
+  - Specifically targets the `XGenerationLab/XiYanSQL-QwenCoder-32B-2412` model.
+  - Implements 4-bit quantization and an adjusted sequence length (e.g., 1024) for memory efficiency.
+  - Optimized for single GPU training (H100/A100 80GB recommended, requires 64GB+ VRAM).
+  - Features dynamic batch size adjustment based on detected GPU type.
+  - Integrated with Weights & Biases for experiment tracking (relies on `WANDB_PROJECT` and optional `WANDB_ENTITY` environment variables).
+
+### Configuration Files
+
+- **`requirements.txt`** - Python dependencies
+  - Lists all required packages for the project
+  - Includes ML libraries (transformers, torch, gradio)
+  - Includes utility packages (pandas, sqlparse, python-dotenv)
+  - Training dependencies (unsloth, wandb, huggingface_hub, bitsandbytes)
+
+- **`.env.example`** - Environment variables template
+  - Template for required environment configuration.
+  - Includes placeholders for `HUGGINGFACE_TOKEN`, `HUGGINGFACE_USERNAME`.
+  - Includes commented-out placeholders for optional Weights & Biases configuration (`WANDB_PROJECT`, `WANDB_ENTITY`) used during model fine-tuning.
+
+### Additional Files
+
+- **`README.md`** - This documentation file
+
+## 🚀 Getting Started
+
+### For Using the Web Interface
+
+1. Install dependencies: `pip install -r requirements.txt`
+2. Copy and configure environment: `cp .env.example .env`
+3. Run the application: `python app_gradio.py`
+
+### For Fine-tuning Models
+
+1. Set up environment variables in `.env`
+2. Ensure you have adequate GPU resources (H100/A100 recommended)
+3. Run the fine-tuning script: `python adjusted-32b-finetuning.py`
 
 ## 🤝 Contributing
 
