@@ -6,17 +6,19 @@ LLM Fine-tuning Script for SQL Generation - Modified for XiYanSQL-QwenCoder-32B-
 Key Changes from Original Script:
 - Updated model name to XiYanSQL-QwenCoder-32B-2412
 - Enabled 4-bit quantization for memory efficiency
-- Reduced batch size and increased gradient accumulation
+- Dynamic batch size adjustment based on GPU type (H100/A100)
 - Adjusted sequence length for memory optimization
 - Added memory optimization configurations
+- Optimized for single GPU training (H100 80GB or A100 80GB)
 
 Environment Variables Required:
 - HUGGINGFACE_TOKEN: Your Hugging Face API token
 - HUGGINGFACE_USERNAME: Your Hugging Face username
 
 Hardware Requirements:
-- Minimum: 64GB VRAM (A100 80GB recommended)
-- Optimal: 80GB+ VRAM for comfortable training
+- Single GPU: 64GB+ VRAM (H100 80GB or A100 80GB recommended)
+- Supports H100 80GB for maximum performance
+- Supports A100 80GB for stable training
 """
 
 # =============================================================================
@@ -42,23 +44,174 @@ from dotenv import load_dotenv
 from mschema_implementation import sql_to_mschema
 from datasets import Dataset, load_dataset, concatenate_datasets
 from trl import SFTTrainer
-from huggingface_hub import login
+from huggingface_hub import login, HfApi
+import wandb
+
 try:
     from unsloth.chat_templates import train_on_responses_only
 except ImportError:
-    print("Warning: unsloth.chat_templates not available, will skip response-only training")
+    print(
+        "Warning: unsloth.chat_templates not available, will skip response-only training"
+    )
 
 # Load environment variables
 load_dotenv()
 
 # =============================================================================
-# 3. Download model - UPDATED FOR 32B MODEL
+# 3. Model Configuration & GPU Detection
 # =============================================================================
 model_name = "XGenerationLab/XiYanSQL-QwenCoder-32B-2412"  # Changed from 3B to 32B
 max_seq_length = 1024  # Reduced from 2048 to 1024 for faster training
 dtype = None
 load_in_4bit = True  # CRITICAL: Enable 4-bit quantization for 32B model
 
+
+# Detect GPU configuration
+def detect_gpu_setup():
+    """Detect available GPUs and their types"""
+    if not torch.cuda.is_available():
+        return {"gpu_count": 0, "gpu_types": [], "total_memory": 0, "setup_type": "CPU"}
+
+    gpu_count = torch.cuda.device_count()
+    gpu_types = []
+    total_memory = 0
+
+    for i in range(gpu_count):
+        props = torch.cuda.get_device_properties(i)
+        gpu_name = props.name
+        gpu_memory = props.total_memory / (1024**3)  # Convert to GB
+        total_memory += gpu_memory
+
+        # Detect GPU type
+        if "H100" in gpu_name:
+            gpu_types.append(f"H100-{int(gpu_memory)}GB")
+        elif "A100" in gpu_name:
+            gpu_types.append(f"A100-{int(gpu_memory)}GB")
+        else:
+            gpu_types.append(f"{gpu_name}-{int(gpu_memory)}GB")
+
+    # Only support single GPU
+    if gpu_count == 1:
+        setup_type = f"Single-{gpu_types[0]}"
+    else:
+        setup_type = f"Unsupported-{gpu_count}GPUs"
+
+    return {
+        "gpu_count": gpu_count,
+        "gpu_types": gpu_types,
+        "total_memory": total_memory,
+        "setup_type": setup_type,
+        "individual_memory": [
+            torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            for i in range(gpu_count)
+        ],
+    }
+
+
+# Get GPU configuration
+gpu_config = detect_gpu_setup()
+print(f"🔍 Detected GPU Setup: {gpu_config['setup_type']}")
+print(f"📊 GPU Count: {gpu_config['gpu_count']}")
+print(f"💾 Total GPU Memory: {gpu_config['total_memory']:.1f}GB")
+for i, gpu_type in enumerate(gpu_config["gpu_types"]):
+    print(f"   GPU {i}: {gpu_type}")
+
+# Single GPU configuration only
+if gpu_config["gpu_count"] != 1:
+    raise ValueError(
+        f"This script is configured for single GPU training only. Detected {gpu_config['gpu_count']} GPUs. Please use CUDA_VISIBLE_DEVICES=0 to select one GPU."
+    )
+
+use_distributed = False
+
+# =============================================================================
+# 4. Initialize Weights & Biases with GPU Configuration
+# =============================================================================
+# Get wandb configuration from environment variables (optional)
+wandb_project = os.getenv("WANDB_PROJECT", "xiyanSQL-32b-finetuning")
+wandb_entity = os.getenv("WANDB_ENTITY", None)  # Optional
+wandb_run_name = (
+    f"xiyanSQL-32b-{gpu_config['setup_type']}-{max_seq_length}seq-{200}steps"
+)
+
+# Create dynamic tags based on GPU configuration
+tags = ["sql", "text2sql", "32b", "lora", "unsloth", "single-gpu"]
+if "H100" in gpu_config["setup_type"]:
+    tags.append("h100")
+if "A100" in gpu_config["setup_type"]:
+    tags.append("a100")
+
+# Adjust batch size based on single GPU configuration
+if gpu_config["gpu_count"] == 1:
+    if "H100" in gpu_config["setup_type"]:
+        # H100 80GB - Maximum utilization
+        per_device_batch_size = 12
+        gradient_accumulation = 4
+        print("🚀 H100 80GB detected - Optimized for maximum performance")
+    elif "A100" in gpu_config["setup_type"]:
+        # A100 80GB - Conservative but efficient
+        per_device_batch_size = 8
+        gradient_accumulation = 6
+        print("🚀 A100 80GB detected - Optimized for stability")
+    else:
+        # Generic single GPU
+        per_device_batch_size = 4
+        gradient_accumulation = 8
+        print("🚀 Generic GPU detected - Conservative settings")
+else:
+    # Should not reach here due to earlier validation
+    raise ValueError(
+        f"This script is configured for single GPU training only. Detected {gpu_config['gpu_count']} GPUs."
+    )
+
+# Initialize wandb with comprehensive GPU information
+wandb.init(
+    project=wandb_project,
+    name=wandb_run_name,
+    config={
+        # Model configuration
+        "model_name": "XGenerationLab/XiYanSQL-QwenCoder-32B-2412",
+        "max_seq_length": max_seq_length,
+        "load_in_4bit": load_in_4bit,
+        "lora_rank": 16,
+        "lora_alpha": 16,
+        "dataset": "nguyenthetuyen/sql-text2sql-dataset",
+        # Training configuration
+        "per_device_train_batch_size": per_device_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation,
+        "effective_batch_size": per_device_batch_size
+        * gradient_accumulation
+        * gpu_config["gpu_count"],
+        "learning_rate": 4e-5,
+        "max_steps": 200,
+        "save_steps": 2,
+        "logging_steps": 2,
+        "optimizer": "adamw_torch_fused",
+        "scheduler": "cosine_with_restarts",
+        # Hardware configuration
+        "gpu_count": gpu_config["gpu_count"],
+        "gpu_setup_type": gpu_config["setup_type"],
+        "gpu_types": gpu_config["gpu_types"],
+        "total_gpu_memory_gb": round(gpu_config["total_memory"], 1),
+        "individual_gpu_memory": [
+            round(mem, 1) for mem in gpu_config["individual_memory"]
+        ],
+        "distributed_training": use_distributed,
+        "hardware_optimization": f"{gpu_config['setup_type']}_optimized",
+        # System information
+        "system_os": "Linux" if "linux" in os.name.lower() else "Other",
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else "N/A",
+    },
+    tags=tags,
+    notes=f"Fine-tuning XiYanSQL-QwenCoder-32B on 100k SQL dataset with {gpu_config['setup_type']} configuration. Total GPU memory: {gpu_config['total_memory']:.1f}GB across {gpu_config['gpu_count']} GPU(s).",
+)
+
+print(f"🔗 Wandb tracking: {wandb.run.url}")
+
+# =============================================================================
+# 5. Download model - UPDATED FOR 32B MODEL
+# =============================================================================
 # WARNING: Ensure you have adequate VRAM (64GB+ recommended)
 print(f"Loading {model_name} with 4-bit quantization...")
 print(f"Sequence length: {max_seq_length}")
@@ -75,7 +228,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 EOS_TOKEN = tokenizer.eos_token
 
 # =============================================================================
-# 4. LoRA Configuration - OPTIMIZED FOR 32B MODEL
+# 6. LoRA Configuration - OPTIMIZED FOR 32B MODEL
 # =============================================================================
 print("Applying LoRA configuration optimized for 32B model...")
 
@@ -102,9 +255,10 @@ model = FastLanguageModel.get_peft_model(
 )
 
 # =============================================================================
-# 5. Data preparation (SAME AS ORIGINAL)
+# 7. Data preparation (SAME AS ORIGINAL)
 # =============================================================================
-# 5.1. Download 100k dataset
+# =============================================================================
+# 7.1. Download 100k dataset
 # Login using e.g. `huggingface-cli login` to access this dataset
 ds = load_dataset("nguyenthetuyen/sql-text2sql-dataset")
 print(ds)
@@ -182,7 +336,7 @@ merged_ds = merged_ds.map(formatting_prompts_func, num_proc=4)
 print(merged_ds["text"][:5])
 
 # =============================================================================
-# 6. Instruction fine-tune - ADJUSTED FOR 32B MODEL
+# 8. Instruction fine-tune - ADJUSTED FOR 32B MODEL
 # =============================================================================
 
 # Login to HuggingFace (using token from environment)
@@ -192,7 +346,12 @@ if not hf_token:
         "HUGGINGFACE_TOKEN not found in environment variables. Please check your .env file."
     )
 
-login(hf_token)
+# Validate token by logging in
+try:
+    login(hf_token)
+    print("✅ Successfully logged in to Hugging Face")
+except Exception as login_error:
+    raise ValueError(f"Failed to login to Hugging Face: {login_error}")
 
 hf_username = os.getenv("HUGGINGFACE_USERNAME")
 if not hf_username:
@@ -200,54 +359,110 @@ if not hf_username:
         "HUGGINGFACE_USERNAME not found in environment variables. Please check your .env file."
     )
 
-print("Configuring training arguments for 32B model...")
+# Test repository access
+print(
+    f"🔍 Testing repository access for: {hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
+)
+api = HfApi()
+try:
+    # Test if we can create/access the repository
+    repo_url = api.create_repo(
+        f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
+        private=True,
+        exist_ok=True,  # Don't fail if repo already exists
+        token=hf_token,
+    )
+    print(f"✅ Repository ready: {repo_url}")
+except Exception as repo_error:
+    print(f"⚠️ Warning: Could not verify repository access: {repo_error}")
+    print("Training will continue, but model upload might fail")
+
+print(f"Configuring training arguments for 32B model on {gpu_config['setup_type']}...")
+print("TRAINING CONFIGURATION:")
+print("- Epochs: 1 full epoch")
+print("- Max steps: 200 steps (hard limit)")
+print("- Logging: Every 2 steps")
+print("- Saving: Every 2 steps")
+print("- Hub uploads: Every 2 steps (every save)")
+print(f"- Per-device batch size: {per_device_batch_size}")
+print(f"- Gradient accumulation: {gradient_accumulation}")
+print(
+    f"- Effective batch size: {per_device_batch_size * gradient_accumulation * gpu_config['gpu_count']} ({per_device_batch_size} × {gradient_accumulation} × {gpu_config['gpu_count']} GPU)"
+)
+
+print(f"{gpu_config['setup_type'].upper()} CONFIGURATION:")
+print(f"- Total GPUs: {gpu_config['gpu_count']}")
+print(f"- Total VRAM: {gpu_config['total_memory']:.1f}GB")
+for i, (gpu_type, memory) in enumerate(
+    zip(gpu_config["gpu_types"], gpu_config["individual_memory"])
+):
+    print(f"- GPU {i}: {gpu_type} ({memory:.1f}GB)")
+print("- Optimizer: adamw_torch_fused (Hardware optimized)")
+print("- Precision: BF16 (Tensor core optimized)")
+print("- PyTorch compile enabled for speed")
+print("- TF32 enabled for tensor cores")
+print("- Weights & Biases logging enabled")
+
 print("SPEED OPTIMIZATIONS:")
-print("- Reduced sequence length to 1024 for faster processing")
-print("- Lower LoRA rank (16) for faster adaptation")
-print("- Higher learning rate (5e-5) for faster convergence")
-print("- Cosine scheduler for better convergence speed")
-print("- Reduced epochs to 0.5 for quick training")
+print("- Reduced sequence length to 1024")
+print("- LoRA rank 16 for faster adaptation")
+print("- Cosine scheduler with restarts")
 print("- Group by length for efficient batching")
-print("- Less frequent saving to reduce I/O overhead")
-print("="*60)
+print("- Single GPU optimization")
+print("=" * 60)
 
 instruct_finetune_args = UnslothTrainingArguments(
     output_dir="/kaggle/working/finetune_32b",
     seed=3407,
-    logging_steps=1,  # Reduced for more frequent logging
-    save_steps=1,  # Increased to save less frequently (faster training)
+    logging_steps=2,  # Log every 2 steps as requested
+    save_steps=2,  # Save every 2 steps as requested
     save_strategy="steps",
-    hub_strategy="end",  # Changed from "every_save" to "end" for faster training
+    hub_strategy="every_save",  # Push to HF every time we save (every 2 steps)
     push_to_hub=True,
     hub_model_id=f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
     hub_private_repo=True,
-    # OPTIMIZED FOR SPEED:
-    per_device_train_batch_size=64,  # Fixed from 64 to 1 - 64 would cause OOM
-    gradient_accumulation_steps=32,  # Increased to maintain effective batch size of 32
-    warmup_ratio=0.03,  # Use ratio instead of steps for better scaling
-    num_train_epochs=0.5,  # Reduced from 1 to 0.5 for faster training
-    fp16=not is_bfloat16_supported(),
-    bf16=is_bfloat16_supported(),
-    learning_rate=5e-5,  # Increased learning rate for faster convergence
-    embedding_learning_rate=1e-5,  # Adjusted proportionally
-    optim="adamw_8bit",  # Use 8-bit optimizer for memory efficiency
-    lr_scheduler_type="cosine",  # Cosine scheduler often converges faster than linear
-    weight_decay=0.01,
-    report_to="none",  # Use this for WandB etc
-    # Additional speed optimizations
-    dataloader_pin_memory=True,  # Enable pin memory for faster data loading (if you have enough RAM)
-    dataloader_num_workers=4,  # Use multiple workers for data loading
+    # OPTIMIZED FOR SINGLE GPU (H100 OR A100):
+    per_device_train_batch_size=per_device_batch_size,  # Dynamic based on GPU type
+    gradient_accumulation_steps=gradient_accumulation,  # Dynamic based on GPU type
+    warmup_steps=20,  # Increased warmup for larger batches
+    num_train_epochs=1.0,  # 1 full epoch as requested
+    max_steps=200,  # 200 steps as requested
+    fp16=False,  # Disable FP16 for better precision
+    bf16=True,  # Force BF16 - Works well on both H100 and A100
+    learning_rate=4e-5,  # Higher LR for faster convergence
+    embedding_learning_rate=2e-5,  # Proportionally higher
+    optim="adamw_torch_fused",  # Optimized fused optimizer
+    lr_scheduler_type="cosine_with_restarts",  # Aggressive scheduler
+    lr_scheduler_kwargs={"num_cycles": 2},  # Fast restart cycles
+    weight_decay=0.005,  # Reduced for faster convergence
+    report_to="wandb",  # Enable Weights & Biases logging
+    # SINGLE GPU OPTIMIZATIONS:
+    dataloader_pin_memory=True,
+    dataloader_num_workers=8,  # More workers for data loading
     remove_unused_columns=True,
-    max_grad_norm=1.0,  # Gradient clipping for stability
-    group_by_length=True,  # Group samples by length for faster training
-    ddp_find_unused_parameters=False,  # Speed optimization for DDP
-    save_safetensors=True,  # Faster saving format
+    max_grad_norm=0.5,  # Looser clipping for speed
+    group_by_length=True,
+    ddp_find_unused_parameters=False,
+    save_safetensors=True,
+    # ADDITIONAL SPEED OPTIMIZATIONS:
+    gradient_checkpointing=False,  # Disable for pure speed (single GPU has enough memory)
+    torch_compile=True,  # Enable PyTorch 2.0 compilation
+    include_inputs_for_metrics=False,  # Skip metric computation
+    prediction_loss_only=True,  # Skip evaluation metrics for speed
+    save_only_model=True,  # Don't save optimizer states
+    load_best_model_at_end=False,  # Skip final model loading
 )
 
 print(
-    f"Effective batch size: {1 * 32} (per_device_batch_size * gradient_accumulation_steps)"
+    f"Effective batch size: {per_device_batch_size * gradient_accumulation} (per_device_train_batch_size * gradient_accumulation_steps)"
 )
-print("Speed optimizations: Higher LR, cosine scheduler, group_by_length, reduced epochs")
+print(
+    f"{gpu_config['setup_type'].upper()} MAXIMUM VRAM UTILIZATION: Batch size {per_device_batch_size}, gradient accumulation {gradient_accumulation}, torch_compile enabled"
+)
+print(
+    "Hub strategy: every_save - model will be pushed to HF after each save checkpoint"
+)
+print("Target: Complete 200 steps of training with frequent saves to HF")
 
 instruct_finetune_trainer = SFTTrainer(
     model=model,
@@ -275,7 +490,7 @@ except NameError:
 
 
 # =============================================================================
-# 7. Additional Memory Monitoring (NEW)
+# 9. Additional Memory Monitoring (NEW)
 # =============================================================================
 def print_memory_usage():
     """Print current GPU memory usage"""
@@ -289,7 +504,7 @@ def print_memory_usage():
 
 
 # =============================================================================
-# 8. Training Execution with Memory Monitoring
+# 10. Training Execution with Memory Monitoring
 # =============================================================================
 if __name__ == "__main__":
     print("🚀 SPEED-OPTIMIZED FINE-TUNING FOR 32B MODEL")
@@ -321,6 +536,42 @@ if __name__ == "__main__":
         instruct_finetune_trainer_stats = instruct_finetune_trainer.train()
         print("Fine-tuning completed successfully!")
 
+        # EXPLICIT MODEL SAVING AND PUSHING
+        print("=" * 60)
+        print("SAVING MODEL TO HUGGING FACE...")
+        print("=" * 60)
+
+        try:
+            # Save model locally first
+            print("🔄 Saving model locally...")
+            model.save_pretrained(f"/kaggle/working/finetune_32b/final_model")
+            tokenizer.save_pretrained(f"/kaggle/working/finetune_32b/final_model")
+            print("✅ Model saved locally")
+
+            # Push to Hugging Face Hub
+            print("🔄 Pushing model to Hugging Face Hub...")
+            model.push_to_hub(
+                f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
+                private=True,
+                token=hf_token,
+            )
+            tokenizer.push_to_hub(
+                f"{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned",
+                private=True,
+                token=hf_token,
+            )
+            print("✅ Model successfully pushed to Hugging Face!")
+            print(
+                f"🔗 Model URL: https://huggingface.co/{hf_username}/XiYanSQL-QwenCoder-32B-2412-100kSQL_finetuned"
+            )
+
+        except Exception as save_error:
+            print(f"❌ Error saving to Hugging Face: {save_error}")
+            print("💡 Check your HUGGINGFACE_TOKEN and permissions")
+            print(
+                "📁 Model is still saved locally at: /kaggle/working/finetune_32b/final_model"
+            )
+
         # Print final memory usage
         print("Final memory usage:")
         print_memory_usage()
@@ -342,11 +593,12 @@ if __name__ == "__main__":
         print_memory_usage()
         raise e
 
+
 # =============================================================================
-# 9. Additional Speed Optimizations
+# 11. Additional Speed Optimizations
 # =============================================================================
 def optimize_for_speed():
-    """Apply additional optimizations for faster training"""
+    """Apply additional optimizations for faster training on H100/A100"""
     if torch.cuda.is_available():
         # Enable optimized attention if available
         try:
@@ -355,20 +607,41 @@ def optimize_for_speed():
         except Exception as e:
             print(f"⚠ Flash Attention not available: {e}")
             pass
-        
-        # Set optimal tensor core usage
+
+        # H100/A100-specific optimizations
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        print("✓ Enabled TF32 for faster computation")
-        
-        # Optimize memory allocation
-        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            torch.cuda.set_per_process_memory_fraction(0.95)
-            print("✓ Optimized GPU memory allocation")
-    
+        print("✓ Enabled TF32 for tensor cores")
+
+        # Enable BF16 mixed precision globally
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        print("✓ Enabled BF16 optimizations")
+
+        # Optimize memory allocation for 80GB GPUs
+        if hasattr(torch.cuda, "set_per_process_memory_fraction"):
+            torch.cuda.set_per_process_memory_fraction(0.98)  # Use more memory
+            print("✓ Optimized GPU memory allocation (98%)")
+
+        # Enable JIT compilation for faster execution
+        torch._C._jit_set_profiling_mode(False)
+        torch._C._jit_set_profiling_executor(False)
+        print("✓ Disabled JIT profiling for speed")
+
     # Set optimal threading for CPU operations
-    torch.set_num_threads(min(8, torch.get_num_threads()))
+    torch.set_num_threads(
+        min(16, torch.get_num_threads())
+    )  # Single GPU systems often have fewer CPU cores allocated
     print(f"✓ Set CPU threads to: {torch.get_num_threads()}")
+
+    # Enable optimized data loading
+    import torch.multiprocessing as mp
+
+    try:
+        mp.set_start_method("spawn", force=True)
+        print("✓ Set multiprocessing start method to spawn")
+    except RuntimeError:
+        pass
+
 
 # Apply optimizations
 print("Applying additional speed optimizations...")
