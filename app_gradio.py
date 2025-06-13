@@ -125,7 +125,7 @@ def load_model(model_name_input=""):
         # Create prompt template
         prompt_template = PromptTemplate(
             input_variables=["schema", "question"],
-            template="""You are now a SQL data analyst, and you are given a database schema as follows:
+            template="""You are a SQL query generator. Your task is to generate ONLY executable SQL queries.
 
 【Schema】
 {schema}
@@ -133,8 +133,16 @@ def load_model(model_name_input=""):
 【Question】
 {question}
 
-Please read and understand the database schema carefully, and generate an executable SQL based on the user's question. The generated SQL is protected by ```sql and ```.
-""",
+IMPORTANT INSTRUCTIONS:
+- Generate ONLY the SQL query, nothing else
+- Do not include any explanations, comments, or additional text
+- Do not use words like "assistant", "here is", "the query is", etc.
+- Do not add prefixes like "SQL:", "Query:", or "Answer:"
+- Start directly with SQL keywords (SELECT, INSERT, UPDATE, DELETE, etc.)
+- End with a semicolon
+- The response should be pure SQL that can be executed directly
+
+Generate the SQL query:""",
         )
 
         # Create LCEL chain (modern LangChain syntax)
@@ -354,10 +362,18 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
                 sql_response = sql_response.split(separator)[0].strip()
                 break
 
-        # Remove common prefixes
-        prefixes_to_remove = ["SQL Query:", "SQL:", "Query:", "Answer:"]
+        # Remove common prefixes (including "assistant" which appears in your output)
+        prefixes_to_remove = [
+            "SQL Query:",
+            "SQL:",
+            "Query:",
+            "Answer:",
+            "assistant",
+            "Assistant",
+            "ASSISTANT",
+        ]
         for prefix in prefixes_to_remove:
-            if sql_response.startswith(prefix):
+            if sql_response.lower().startswith(prefix.lower()):
                 sql_response = sql_response[len(prefix) :].strip()
 
         # Remove any trailing text after semicolon if it's not SQL
@@ -382,19 +398,10 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
         # Validate the SQL
         is_valid, validation_msg = validate_sql(formatted_sql)
 
-        # Create the final output with validation info
-        result_parts = [f"-- Question: {question}"]
-
-        if not is_valid:
-            result_parts.append(f"-- ⚠️ Validation: {validation_msg}")
-        elif "Warning" in validation_msg:
-            result_parts.append(f"-- {validation_msg}")
-
-        result_parts.append(formatted_sql)
-
+        # Return just the clean SQL query without comments
         progress(1.0, desc="Complete!")
 
-        return "\n".join(result_parts), db_message
+        return formatted_sql, db_message
 
     except Exception as e:
         return f"❌ Error generating SQL: {str(e)}", "❌ Error occurred"
