@@ -2,6 +2,8 @@
 
 A modern web interface for generating SQL queries from natural language using a fine-tuned XiYanSQL model.
 
+[View on GitHub](https://github.com/quanminh6g123/text-to-sql)
+
 ## Features
 
 - 🎯 **Natural Language to SQL**: Convert questions to SQL queries
@@ -41,7 +43,7 @@ docker-compose up --build
 
 Create a `.env` file with:
 
-```
+```env
 HUGGINGFACE_TOKEN=your_token_here
 HUGGINGFACE_USERNAME=your_username_here
 ```
