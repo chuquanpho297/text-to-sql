@@ -32,15 +32,22 @@ db_connection = None
 current_schema_sql = None
 
 
-def load_model():
+def load_model(model_name_input=""):
     """Load the fine-tuned model and tokenizer with LangChain pipeline"""
     global model, tokenizer, llm_pipeline, llm_chain
     try:
-        model_name = "hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned"
+        # Use input model name or default
+        model_name = (
+            model_name_input.strip()
+            if model_name_input.strip()
+            else "hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned"
+        )
 
         # Check if we have a HuggingFace token
         hf_token = os.getenv("HUGGINGFACE_TOKEN")
         print("HuggingFace Token:", hf_token)
+
+        yield f"🔄 Loading model: {model_name}..."
         yield "🔄 Loading tokenizer..."
 
         tokenizer = AutoTokenizer.from_pretrained(
@@ -976,6 +983,13 @@ def create_interface():
                     gr.HTML(
                         "<h3 style='color: #2E86AB; margin-bottom: 20px;'>🚀 Model Setup</h3>"
                     )
+                    model_name_input = gr.Textbox(
+                        label="Model Name",
+                        value="hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned",
+                        placeholder="Enter Hugging Face model name (e.g., microsoft/DialoGPT-medium)",
+                        lines=1,
+                        elem_classes="input-field",
+                    )
                     with gr.Row(elem_classes="button-row"):
                         load_btn = gr.Button("Load Model", variant="primary", size="lg")
                         clear_memory_btn = gr.Button(
@@ -1099,7 +1113,12 @@ def create_interface():
                     """)
 
         # Event handlers
-        load_btn.click(load_model, outputs=load_status, show_progress=True)
+        load_btn.click(
+            load_model,
+            inputs=[model_name_input],
+            outputs=load_status,
+            show_progress=True,
+        )
 
         clear_memory_btn.click(clear_memory, outputs=load_status)
 
