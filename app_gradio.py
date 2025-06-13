@@ -40,7 +40,7 @@ def load_model():
 
         # Check if we have a HuggingFace token
         hf_token = os.getenv("HUGGINGFACE_TOKEN")
-
+        print("HuggingFace Token:", hf_token)
         yield "🔄 Loading tokenizer..."
 
         tokenizer = AutoTokenizer.from_pretrained(
@@ -194,22 +194,27 @@ def csv_to_sql_context(csv_schema):
     return "\n".join(sql_parts)
 
 
-def parse_sql_schema(schema_text):
+def parse_sql_schema(schema_text, db_name_input=None):
     """Parse SQL schema text to extract database name and SQL context"""
     schema_text = schema_text.strip()
-    
-    # Extract database name if present
-    db_name = "database"  # default
-    sql_context = schema_text
-    
-    if schema_text.startswith("DB_NAME:"):
-        lines = schema_text.split('\n')
-        first_line = lines[0].strip()
-        if first_line.startswith("DB_NAME:"):
-            db_name = first_line.replace("DB_NAME:", "").strip()
-            # Remove the DB_NAME line and rejoin the rest
-            sql_context = '\n'.join(lines[1:]).strip()
-    
+
+    # Use provided db_name_input if available, otherwise extract from schema
+    if db_name_input and db_name_input.strip():
+        db_name = db_name_input.strip()
+        sql_context = schema_text
+    else:
+        # Extract database name if present in schema text
+        db_name = "database"  # default
+        sql_context = schema_text
+
+        if schema_text.startswith("DB_NAME:"):
+            lines = schema_text.split("\n")
+            first_line = lines[0].strip()
+            if first_line.startswith("DB_NAME:"):
+                db_name = first_line.replace("DB_NAME:", "").strip()
+                # Remove the DB_NAME line and rejoin the rest
+                sql_context = "\n".join(lines[1:]).strip()
+
     return db_name, sql_context
 
 
@@ -217,7 +222,7 @@ def init_database_only(schema_text):
     """Initialize database from schema without generating SQL"""
     if not schema_text.strip():
         return "❌ Please provide a database schema."
-    
+
     try:
         # Initialize the database with the schema
         db_success, db_message = init_database_from_schema(schema_text.strip())
@@ -231,7 +236,10 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
     global llm_chain
 
     if llm_chain is None:
-        return "❌ Please load the model first by clicking 'Load Model' button.", "❌ No database loaded"
+        return (
+            "❌ Please load the model first by clicking 'Load Model' button.",
+            "❌ No database loaded",
+        )
 
     if not schema_text.strip():
         return "❌ Please provide a database schema.", "❌ No database loaded"
@@ -241,26 +249,29 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
     try:
         progress(0.1, desc="Initializing database...")
-        
+
         # Initialize the database with the schema
         db_success, db_message = init_database_from_schema(schema_text.strip())
-        
+
         if not db_success:
             return db_message, "❌ Database initialization failed"
 
         progress(0.3, desc="Converting schema to M-Schema format...")
-        
+
         # Check if input is in new SQL format or old CSV format
         if schema_text.strip().startswith("DB_NAME:") or "CREATE TABLE" in schema_text:
             # New SQL format
-            db_name, sql_context = parse_sql_schema(schema_text.strip())
+            db_name, sql_context = parse_sql_schema(schema_text.strip(), "")
         else:
             # Old CSV format - convert to SQL first
             sql_context = csv_to_sql_context(schema_text.strip())
             db_name = "database"
-            
+
             if not sql_context:
-                return "❌ Failed to parse the schema. Please check the format.", "❌ Schema parsing failed"
+                return (
+                    "❌ Failed to parse the schema. Please check the format.",
+                    "❌ Schema parsing failed",
+                )
 
         # Convert to M-Schema format
         mschema_format = sql_to_mschema(sql_context, db_name)
@@ -315,7 +326,10 @@ def generate_sql(schema_text, question, progress=gr.Progress()):
 
         # If response is empty or too short, return an error
         if not sql_response or len(sql_response) < 5:
-            return "❌ Failed to generate SQL. Please try rephrasing your question.", db_message
+            return (
+                "❌ Failed to generate SQL. Please try rephrasing your question.",
+                db_message,
+            )
 
         # Format the SQL
         formatted_sql = format_sql(sql_response)
@@ -345,26 +359,27 @@ def execute_generated_sql(sql_query):
     """Execute the generated SQL query and return formatted results"""
     if not sql_query.strip():
         return "❌ No SQL query to execute.", ""
-    
+
     # Execute the query
     success, message, df = execute_sql_query(sql_query)
-    
+
     if not success:
         return message, ""
-    
+
     if df is None:
         return message, ""
-    
+
     # Format results for display
     formatted_results = format_query_results(df)
-    
+
     return message, formatted_results
 
 
 # Example schemas
 EXAMPLE_SCHEMAS = {
-    "E-commerce Database": """DB_NAME: ecommerce
-    CREATE TABLE customers (
+    "E-commerce Database": {
+        "db_name": "ecommerce",
+        "schema": """CREATE TABLE customers (
         customer_id INTEGER PRIMARY KEY,
         name TEXT,
         email TEXT,
@@ -401,9 +416,10 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 1, 1, '2024-01-15'),
     (2, 2, 2, 2, '2024-01-16'),
     (3, 1, 3, 1, '2024-01-17');""",
-
-    "Library Management": """DB_NAME: library
-    CREATE TABLE books (
+    },
+    "Library Management": {
+        "db_name": "library",
+        "schema": """CREATE TABLE books (
         book_id INTEGER PRIMARY KEY,
         title TEXT,
         author TEXT,
@@ -440,9 +456,10 @@ EXAMPLE_SCHEMAS = {
     INSERT INTO loans (loan_id, book_id, member_id, loan_date, return_date) VALUES 
     (1, 2, 1, '2024-01-10', NULL),
     (2, 1, 2, '2024-01-05', '2024-01-15');""",
-
-    "Sales Database": """DB_NAME: sales
-    CREATE TABLE salespeople (
+    },
+    "Sales Database": {
+        "db_name": "sales",
+        "schema": """CREATE TABLE salespeople (
         salesperson_id INTEGER PRIMARY KEY,
         name TEXT,
         region TEXT
@@ -465,9 +482,10 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 15000, '2024-01-15'),
     (2, 2, 22000, '2024-01-16'),
     (3, 1, 18000, '2024-01-17');""",
-
-    "HR Management": """DB_NAME: hr_system
-    CREATE TABLE employees (
+    },
+    "HR Management": {
+        "db_name": "hr_system",
+        "schema": """CREATE TABLE employees (
         employee_id INTEGER PRIMARY KEY,
         name TEXT,
         department TEXT,
@@ -504,9 +522,10 @@ EXAMPLE_SCHEMAS = {
     INSERT INTO projects (project_id, project_name, department_id, budget, start_date) VALUES 
     (1, 'AI Platform', 1, 100000, '2024-01-01'),
     (2, 'Sales Campaign', 2, 50000, '2024-02-01');""",
-
-    "School Database": """DB_NAME: school
-    CREATE TABLE students (
+    },
+    "School Database": {
+        "db_name": "school",
+        "schema": """CREATE TABLE students (
         student_id INTEGER PRIMARY KEY,
         name TEXT,
         grade INTEGER,
@@ -544,6 +563,7 @@ EXAMPLE_SCHEMAS = {
     (1, 1, 1, 'A', 'Fall2024'),
     (2, 1, 2, 'B+', 'Fall2024'),
     (3, 2, 1, 'A-', 'Fall2024');""",
+    },
 }
 
 
@@ -553,26 +573,30 @@ def load_example_schema_and_init_db(example_name):
         # Validate example name
         if not example_name:
             return "", "❌ Please select an example from the dropdown"
-        
+
         if example_name not in EXAMPLE_SCHEMAS:
             return "", f"❌ Example '{example_name}' not found"
-        
-        schema = EXAMPLE_SCHEMAS[example_name]
-        if not schema:
+
+        schema_data = EXAMPLE_SCHEMAS[example_name]
+        if not schema_data:
             return "", f"❌ Example '{example_name}' is empty"
-        
+
+        schema_text = schema_data.get("schema", "")
+        if not schema_text:
+            return "", f"❌ Example '{example_name}' has no schema"
+
         print(f"Loading example: {example_name}")
-        print(f"Schema length: {len(schema)}")
-        
+        print(f"Schema length: {len(schema_text)}")
+
         # Initialize the database
-        db_success, db_message = init_database_from_schema(schema)
+        db_success, db_message = init_database_from_schema(schema_text)
         print(f"DB init result: {db_success}, message: {db_message}")
-        
+
         if not db_success:
-            return schema, f"❌ Database initialization failed: {db_message}"
-        
-        return schema, db_message
-        
+            return schema_text, f"❌ Database initialization failed: {db_message}"
+
+        return schema_text, db_message
+
     except Exception as e:
         error_msg = f"❌ Error loading example '{example_name}': {str(e)}"
         print(error_msg)
@@ -581,7 +605,10 @@ def load_example_schema_and_init_db(example_name):
 
 def load_example_schema(example_name):
     """Load an example schema"""
-    return EXAMPLE_SCHEMAS.get(example_name, "")
+    example_data = EXAMPLE_SCHEMAS.get(example_name, {})
+    if example_data:
+        return example_data.get("db_name", ""), example_data.get("schema", "")
+    return "", ""
 
 
 def clear_memory():
@@ -710,16 +737,16 @@ def validate_sql(sql_query):
 def init_database_from_schema(schema_text):
     """Initialize in-memory SQLite database from schema text"""
     global db_connection, current_schema_sql
-    
+
     try:
         # Close existing connection if any
         if db_connection:
             db_connection.close()
-        
+
         # Create new in-memory database
         db_connection = sqlite3.connect(":memory:")
         cursor = db_connection.cursor()
-        
+
         # Parse schema text
         if schema_text.strip().startswith("DB_NAME:") or "CREATE TABLE" in schema_text:
             # SQL format
@@ -729,13 +756,13 @@ def init_database_from_schema(schema_text):
             # CSV format - convert to SQL first
             sql_context = csv_to_sql_context(schema_text.strip())
             current_schema_sql = sql_context
-            
+
             if not sql_context:
                 return False, "❌ Failed to parse the schema. Please check the format."
-        
+
         # Execute SQL statements
-        sql_statements = current_schema_sql.split(';')
-        
+        sql_statements = current_schema_sql.split(";")
+
         for statement in sql_statements:
             statement = statement.strip()
             if statement:
@@ -744,17 +771,17 @@ def init_database_from_schema(schema_text):
                 except sqlite3.Error as e:
                     print(f"Warning: Error executing statement '{statement}': {e}")
                     continue
-        
+
         db_connection.commit()
-        
+
         # Get table names and row counts to verify
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = cursor.fetchall()
         table_names = [table[0] for table in tables]
-        
+
         if not table_names:
             return False, "❌ No tables were created. Please check your schema."
-        
+
         # Get row counts for each table
         table_info = []
         for table_name in table_names:
@@ -764,13 +791,13 @@ def init_database_from_schema(schema_text):
                 table_info.append(f"{table_name} ({row_count} rows)")
             except sqlite3.Error:
                 table_info.append(f"{table_name} (unknown rows)")
-        
+
         success_message = "✅ Database initialized successfully!\n"
         success_message += f"📊 Tables created: {', '.join(table_info)}\n"
         success_message += "🚀 Ready to generate and execute SQL queries!"
-            
+
         return True, success_message
-        
+
     except Exception as e:
         return False, f"❌ Error initializing database: {str(e)}"
 
@@ -778,43 +805,47 @@ def init_database_from_schema(schema_text):
 def execute_sql_query(sql_query):
     """Execute SQL query on the in-memory database and return results"""
     global db_connection
-    
+
     if not db_connection:
         return False, "❌ No database connection. Please load a schema first.", None
-    
+
     try:
         # Clean the SQL query
         cleaned_query = sql_query.strip()
-        if cleaned_query.startswith('--'):
+        if cleaned_query.startswith("--"):
             # Remove comment lines
-            lines = cleaned_query.split('\n')
-            sql_lines = [line for line in lines if not line.strip().startswith('--')]
-            cleaned_query = '\n'.join(sql_lines).strip()
-        
+            lines = cleaned_query.split("\n")
+            sql_lines = [line for line in lines if not line.strip().startswith("--")]
+            cleaned_query = "\n".join(sql_lines).strip()
+
         # Remove trailing semicolon if present
-        if cleaned_query.endswith(';'):
+        if cleaned_query.endswith(";"):
             cleaned_query = cleaned_query[:-1]
-        
+
         if not cleaned_query:
             return False, "❌ Empty SQL query.", None
-        
+
         cursor = db_connection.cursor()
         cursor.execute(cleaned_query)
-        
+
         # Get column names
-        column_names = [description[0] for description in cursor.description] if cursor.description else []
-        
+        column_names = (
+            [description[0] for description in cursor.description]
+            if cursor.description
+            else []
+        )
+
         # Fetch results
         results = cursor.fetchall()
-        
+
         if not results:
             return True, "✅ Query executed successfully but returned no results.", None
-        
+
         # Convert to pandas DataFrame for better display
         df = pd.DataFrame(results, columns=column_names)
-        
+
         return True, f"✅ Query executed successfully. Found {len(results)} rows.", df
-        
+
     except sqlite3.Error as e:
         return False, f"❌ SQL Error: {str(e)}", None
     except Exception as e:
@@ -825,16 +856,16 @@ def format_query_results(df):
     """Format query results for display"""
     if df is None or df.empty:
         return "No results to display."
-    
+
     try:
         # Use tabulate for nice formatting
-        formatted_table = tabulate(df, headers='keys', tablefmt='grid', showindex=False)
-        
+        formatted_table = tabulate(df, headers="keys", tablefmt="grid", showindex=False)
+
         # Add some summary information
         summary = f"Query Results ({len(df)} rows, {len(df.columns)} columns)\n"
         summary += "=" * 50 + "\n"
         summary += formatted_table
-        
+
         return summary
     except Exception:
         # Fallback to simple string representation
@@ -942,21 +973,29 @@ def create_interface():
             with gr.Column(scale=2):
                 # Model loading section
                 with gr.Group(elem_classes="main-section"):
-                    gr.HTML("<h3 style='color: #2E86AB; margin-bottom: 20px;'>🚀 Model Setup</h3>")
+                    gr.HTML(
+                        "<h3 style='color: #2E86AB; margin-bottom: 20px;'>🚀 Model Setup</h3>"
+                    )
                     with gr.Row(elem_classes="button-row"):
                         load_btn = gr.Button("Load Model", variant="primary", size="lg")
-                        clear_memory_btn = gr.Button("Clear Memory", variant="secondary", size="sm")
-                        info_btn = gr.Button("Model Info", variant="secondary", size="sm")
+                        clear_memory_btn = gr.Button(
+                            "Clear Memory", variant="secondary", size="sm"
+                        )
+                        info_btn = gr.Button(
+                            "Model Info", variant="secondary", size="sm"
+                        )
                     load_status = gr.Textbox(
-                        label="Model Status", 
-                        interactive=False, 
+                        label="Model Status",
+                        interactive=False,
                         lines=3,
-                        elem_classes="status-box"
+                        elem_classes="status-box",
                     )
 
                 # Main interface
                 with gr.Group(elem_classes="main-section"):
-                    gr.HTML("<h3 style='color: #2E86AB; margin-bottom: 20px;'>💬 Generate SQL Query</h3>")
+                    gr.HTML(
+                        "<h3 style='color: #2E86AB; margin-bottom: 20px;'>💬 Generate SQL Query</h3>"
+                    )
 
                     with gr.Row():
                         with gr.Column():
@@ -965,7 +1004,7 @@ def create_interface():
                                 placeholder="Paste your database schema here (SQL CREATE TABLE and INSERT statements)...",
                                 lines=12,
                                 max_lines=20,
-                                show_label=True
+                                show_label=True,
                             )
                         with gr.Column():
                             question_input = gr.Textbox(
@@ -973,67 +1012,77 @@ def create_interface():
                                 placeholder="What data do you want to query? Example: 'Show me all customers' or 'What's the total revenue?'",
                                 lines=6,
                                 max_lines=12,
-                                show_label=True
+                                show_label=True,
                             )
 
                     with gr.Row(elem_classes="button-row"):
-                        init_db_btn = gr.Button("🗄️ Initialize Database", variant="secondary", size="lg")
-                        generate_btn = gr.Button("🚀 Generate SQL", variant="primary", size="lg")
-                        execute_btn = gr.Button("▶️ Execute SQL", variant="success", size="lg")
-                        clear_btn = gr.Button("🗑️ Clear All", variant="secondary", size="sm")
+                        init_db_btn = gr.Button(
+                            "🗄️ Initialize Database", variant="secondary", size="lg"
+                        )
+                        generate_btn = gr.Button(
+                            "🚀 Generate SQL", variant="primary", size="lg"
+                        )
+                        execute_btn = gr.Button(
+                            "▶️ Execute SQL", variant="success", size="lg"
+                        )
+                        clear_btn = gr.Button(
+                            "🗑️ Clear All", variant="secondary", size="sm"
+                        )
 
                     # SQL Output
                     sql_output = gr.Code(
-                        label="📝 Generated SQL Query", 
-                        language="sql", 
+                        label="📝 Generated SQL Query",
+                        language="sql",
                         lines=8,
-                        show_label=True
+                        show_label=True,
                     )
-                    
+
                     # Database and execution status
                     with gr.Row():
                         with gr.Column():
                             db_status = gr.Textbox(
-                                label="🗄️ Database Status", 
-                                interactive=False, 
+                                label="🗄️ Database Status",
+                                interactive=False,
                                 lines=3,
                                 placeholder="Database not initialized...",
                                 elem_classes="status-box",
-                                show_label=True
+                                show_label=True,
                             )
                         with gr.Column():
                             results_status = gr.Textbox(
-                                label="⚡ Execution Status", 
-                                interactive=False, 
+                                label="⚡ Execution Status",
+                                interactive=False,
                                 lines=2,
                                 elem_classes="status-box",
-                                show_label=True
+                                show_label=True,
                             )
-                    
+
                     # Query results
                     query_results = gr.Textbox(
-                        label="📋 Query Results", 
+                        label="📋 Query Results",
                         lines=12,
                         max_lines=20,
                         interactive=False,
                         elem_classes="status-box",
-                        show_label=True
+                        show_label=True,
                     )
 
             with gr.Column(scale=1):
                 # Example schemas
                 with gr.Group(elem_classes="sidebar-section"):
-                    gr.HTML("<h3 style='color: #2E86AB; margin-bottom: 15px;'>📋 Example Schemas</h3>")
+                    gr.HTML(
+                        "<h3 style='color: #2E86AB; margin-bottom: 15px;'>📋 Example Schemas</h3>"
+                    )
                     example_dropdown = gr.Dropdown(
                         choices=list(EXAMPLE_SCHEMAS.keys()),
                         label="Choose an example",
                         value=None,
                         interactive=True,
-                        show_label=True
+                        show_label=True,
                     )
-                    load_example_btn = gr.Button("📥 Load Example", variant="secondary", size="lg")
-
-
+                    load_example_btn = gr.Button(
+                        "📥 Load Example", variant="secondary", size="lg"
+                    )
 
                 # Example questions
                 with gr.Group(elem_classes="sidebar-section"):
@@ -1069,7 +1118,7 @@ def create_interface():
             outputs=[sql_output, db_status],
             show_progress=True,
         )
-        
+
         execute_btn.click(
             execute_generated_sql,
             inputs=[sql_output],
@@ -1086,35 +1135,50 @@ def create_interface():
                 db_connection = None
             return "", "", "", "Database connection closed", "", ""
 
-        clear_btn.click(clear_all, outputs=[schema_input, question_input, sql_output, db_status, results_status, query_results])
+        clear_btn.click(
+            clear_all,
+            outputs=[
+                schema_input,
+                question_input,
+                sql_output,
+                db_status,
+                results_status,
+                query_results,
+            ],
+        )
 
         load_example_btn.click(
-            load_example_schema_and_init_db, 
-            inputs=example_dropdown, 
-            outputs=[schema_input, db_status]
+            load_example_schema_and_init_db,
+            inputs=example_dropdown,
+            outputs=[schema_input, db_status],
         )
 
         # Example interactions
         gr.Examples(
             examples=[
                 [
-                    EXAMPLE_SCHEMAS["E-commerce Database"],
+                    "ecommerce",
+                    EXAMPLE_SCHEMAS["E-commerce Database"]["schema"],
                     "Show me the total revenue by product category",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["Library Management"],
+                    "library",
+                    EXAMPLE_SCHEMAS["Library Management"]["schema"],
                     "Find all books that are currently borrowed",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["Sales Database"],
+                    "sales",
+                    EXAMPLE_SCHEMAS["Sales Database"]["schema"],
                     "Which salesperson has the highest total sales?",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["HR Management"],
+                    "hr_system",
+                    EXAMPLE_SCHEMAS["HR Management"]["schema"],
                     "List all employees in Engineering department with their salaries",
                 ],
                 [
-                    EXAMPLE_SCHEMAS["School Database"],
+                    "school",
+                    EXAMPLE_SCHEMAS["School Database"]["schema"],
                     "Show average grade for each course",
                 ],
             ],
