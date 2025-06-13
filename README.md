@@ -5,9 +5,11 @@ A modern web interface for generating SQL queries from natural language using a 
 ## Features
 
 - 🎯 **Natural Language to SQL**: Convert questions to SQL queries
+- 🗄️ **In-Memory Database**: Automatic SQLite database creation from schema
+- ▶️ **Query Execution**: Run generated SQL and view formatted results  
 - ⚡ **Fast & Lightweight**: Built with Gradio for optimal ML model performance  
 - 💡 **Example Schemas**: Pre-loaded database examples
-- 🔒 **Secure**: Environment-based token management
+- 🔒 **Secure**: Environment-based token management + safe in-memory testing
 - 📱 **Responsive**: Works on desktop and mobile
 - 🌐 **Easy Sharing**: Built-in public URL sharing with Gradio
 - 🐳 **Docker Ready**: Easy deployment with Docker
@@ -137,3 +139,17 @@ Feel free to submit issues, feature requests, or pull requests to improve the in
 ## 📄 License
 
 This project is open source. Please check the model license on Hugging Face for usage restrictions.
+
+## 🆕 New Features (Database Integration)
+
+- **In-Memory SQLite Database**: Automatically creates a SQLite database in memory from your schema
+- **Query Execution**: Execute generated SQL queries and see real results
+- **Data Validation**: Test your queries against actual data before using in production
+- **Safe Testing Environment**: All operations run in memory - no persistent changes
+
+### How It Works
+
+1. **Load Schema**: When you provide a database schema, the app creates an in-memory SQLite database
+2. **Initialize Data**: All CREATE TABLE and INSERT statements are executed to populate the database
+3. **Generate SQL**: The AI generates SQL queries based on your questions
+4. **Execute & View**: Click "Execute SQL" to run the query and see formatted results
