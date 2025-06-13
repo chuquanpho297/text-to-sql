@@ -17,6 +17,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 import sqlparse  # For better SQL formatting and validation
 from mschema_implementation import sql_to_mschema
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +31,7 @@ llm_chain = None
 # Global variable for in-memory SQLite database
 db_connection = None
 current_schema_sql = None
+db_lock = threading.Lock()  # Thread lock for database operations
 
 
 def load_model(model_name_input=""):
@@ -37,11 +39,7 @@ def load_model(model_name_input=""):
     global model, tokenizer, llm_pipeline, llm_chain
     try:
         # Use input model name or default
-        model_name = (
-            model_name_input.strip()
-            if model_name_input.strip()
-            else "hng229/XiYanSQL-QwenCoder-3B-2502-100kSQL_finetuned"
-        )
+        model_name = model_name_input.strip() if model_name_input.strip() else ""
 
         # Check if we have a HuggingFace token
         hf_token = os.getenv("HUGGINGFACE_TOKEN")
@@ -745,68 +743,76 @@ def init_database_from_schema(schema_text):
     """Initialize in-memory SQLite database from schema text"""
     global db_connection, current_schema_sql
 
-    try:
-        # Close existing connection if any
-        if db_connection:
-            db_connection.close()
+    with db_lock:  # Ensure thread-safe database operations
+        try:
+            # Close existing connection if any
+            if db_connection:
+                db_connection.close()
 
-        # Create new in-memory database
-        db_connection = sqlite3.connect(":memory:")
-        cursor = db_connection.cursor()
+            # Create new in-memory database with thread safety disabled
+            # This is safe for in-memory databases in Gradio's multi-threaded environment
+            db_connection = sqlite3.connect(":memory:", check_same_thread=False)
+            cursor = db_connection.cursor()
 
-        # Parse schema text
-        if schema_text.strip().startswith("DB_NAME:") or "CREATE TABLE" in schema_text:
-            # SQL format
-            db_name, sql_context = parse_sql_schema(schema_text.strip())
-            current_schema_sql = sql_context
-        else:
-            # CSV format - convert to SQL first
-            sql_context = csv_to_sql_context(schema_text.strip())
-            current_schema_sql = sql_context
+            # Parse schema text
+            if (
+                schema_text.strip().startswith("DB_NAME:")
+                or "CREATE TABLE" in schema_text
+            ):
+                # SQL format
+                db_name, sql_context = parse_sql_schema(schema_text.strip())
+                current_schema_sql = sql_context
+            else:
+                # CSV format - convert to SQL first
+                sql_context = csv_to_sql_context(schema_text.strip())
+                current_schema_sql = sql_context
 
-            if not sql_context:
-                return False, "❌ Failed to parse the schema. Please check the format."
+                if not sql_context:
+                    return (
+                        False,
+                        "❌ Failed to parse the schema. Please check the format.",
+                    )
 
-        # Execute SQL statements
-        sql_statements = current_schema_sql.split(";")
+            # Execute SQL statements
+            sql_statements = current_schema_sql.split(";")
 
-        for statement in sql_statements:
-            statement = statement.strip()
-            if statement:
+            for statement in sql_statements:
+                statement = statement.strip()
+                if statement:
+                    try:
+                        cursor.execute(statement)
+                    except sqlite3.Error as e:
+                        print(f"Warning: Error executing statement '{statement}': {e}")
+                        continue
+
+            db_connection.commit()
+
+            # Get table names and row counts to verify
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = cursor.fetchall()
+            table_names = [table[0] for table in tables]
+
+            if not table_names:
+                return False, "❌ No tables were created. Please check your schema."
+
+            # Get row counts for each table
+            table_info = []
+            for table_name in table_names:
                 try:
-                    cursor.execute(statement)
-                except sqlite3.Error as e:
-                    print(f"Warning: Error executing statement '{statement}': {e}")
-                    continue
+                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                    row_count = cursor.fetchone()[0]
+                    table_info.append(f"{table_name} ({row_count} rows)")
+                except sqlite3.Error:
+                    table_info.append(f"{table_name} (unknown rows)")
 
-        db_connection.commit()
+            success_message = "✅ Database initialized successfully!\n"
+            success_message += f"📊 Tables created: {', '.join(table_info)}\n"
+            success_message += "🚀 Ready to generate and execute SQL queries!"
 
-        # Get table names and row counts to verify
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = cursor.fetchall()
-        table_names = [table[0] for table in tables]
+            return True, success_message
 
-        if not table_names:
-            return False, "❌ No tables were created. Please check your schema."
-
-        # Get row counts for each table
-        table_info = []
-        for table_name in table_names:
-            try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                row_count = cursor.fetchone()[0]
-                table_info.append(f"{table_name} ({row_count} rows)")
-            except sqlite3.Error:
-                table_info.append(f"{table_name} (unknown rows)")
-
-        success_message = "✅ Database initialized successfully!\n"
-        success_message += f"📊 Tables created: {', '.join(table_info)}\n"
-        success_message += "🚀 Ready to generate and execute SQL queries!"
-
-        return True, success_message
-
-    except Exception as e:
-        return False, f"❌ Error initializing database: {str(e)}"
+        except Exception as e:
+            return False, f"❌ Error initializing database: {str(e)}"
 
 
 def execute_sql_query(sql_query):
@@ -816,47 +822,58 @@ def execute_sql_query(sql_query):
     if not db_connection:
         return False, "❌ No database connection. Please load a schema first.", None
 
-    try:
-        # Clean the SQL query
-        cleaned_query = sql_query.strip()
-        if cleaned_query.startswith("--"):
-            # Remove comment lines
-            lines = cleaned_query.split("\n")
-            sql_lines = [line for line in lines if not line.strip().startswith("--")]
-            cleaned_query = "\n".join(sql_lines).strip()
+    with db_lock:  # Ensure thread-safe database operations
+        try:
+            # Clean the SQL query
+            cleaned_query = sql_query.strip()
+            if cleaned_query.startswith("--"):
+                # Remove comment lines
+                lines = cleaned_query.split("\n")
+                sql_lines = [
+                    line for line in lines if not line.strip().startswith("--")
+                ]
+                cleaned_query = "\n".join(sql_lines).strip()
 
-        # Remove trailing semicolon if present
-        if cleaned_query.endswith(";"):
-            cleaned_query = cleaned_query[:-1]
+            # Remove trailing semicolon if present
+            if cleaned_query.endswith(";"):
+                cleaned_query = cleaned_query[:-1]
 
-        if not cleaned_query:
-            return False, "❌ Empty SQL query.", None
+            if not cleaned_query:
+                return False, "❌ Empty SQL query.", None
 
-        cursor = db_connection.cursor()
-        cursor.execute(cleaned_query)
+            cursor = db_connection.cursor()
+            cursor.execute(cleaned_query)
 
-        # Get column names
-        column_names = (
-            [description[0] for description in cursor.description]
-            if cursor.description
-            else []
-        )
+            # Get column names
+            column_names = (
+                [description[0] for description in cursor.description]
+                if cursor.description
+                else []
+            )
 
-        # Fetch results
-        results = cursor.fetchall()
+            # Fetch results
+            results = cursor.fetchall()
 
-        if not results:
-            return True, "✅ Query executed successfully but returned no results.", None
+            if not results:
+                return (
+                    True,
+                    "✅ Query executed successfully but returned no results.",
+                    None,
+                )
 
-        # Convert to pandas DataFrame for better display
-        df = pd.DataFrame(results, columns=column_names)
+            # Convert to pandas DataFrame for better display
+            df = pd.DataFrame(results, columns=column_names)
 
-        return True, f"✅ Query executed successfully. Found {len(results)} rows.", df
+            return (
+                True,
+                f"✅ Query executed successfully. Found {len(results)} rows.",
+                df,
+            )
 
-    except sqlite3.Error as e:
-        return False, f"❌ SQL Error: {str(e)}", None
-    except Exception as e:
-        return False, f"❌ Error executing query: {str(e)}", None
+        except sqlite3.Error as e:
+            return False, f"❌ SQL Error: {str(e)}", None
+        except Exception as e:
+            return False, f"❌ Error executing query: {str(e)}", None
 
 
 def format_query_results(df):
@@ -1149,9 +1166,10 @@ def create_interface():
         def clear_all():
             global db_connection
             # Close database connection
-            if db_connection:
-                db_connection.close()
-                db_connection = None
+            with db_lock:  # Ensure thread-safe database operations
+                if db_connection:
+                    db_connection.close()
+                    db_connection = None
             return "", "", "", "Database connection closed", "", ""
 
         clear_btn.click(
