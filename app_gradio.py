@@ -96,7 +96,7 @@ def load_model(model_name_input=""):
 
         yield "🔄 Setting up LangChain pipeline..."
 
-        # Create HuggingFace pipeline for text generation (force GPU device)
+        # Create HuggingFace pipeline for text generation
         hf_pipeline = pipeline(
             "text-generation",
             model=model,
@@ -109,7 +109,6 @@ def load_model(model_name_input=""):
             return_full_text=False,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            device=0,  # Force GPU device 0
         )
 
         # Verify pipeline is using GPU
