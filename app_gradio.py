@@ -38,6 +38,25 @@ def load_model(model_name_input=""):
     """Load the fine-tuned model and tokenizer with LangChain pipeline"""
     global model, tokenizer, llm_pipeline, llm_chain
     try:
+        # GPU requirement check - fail immediately if no GPU available
+        if not torch.cuda.is_available():
+            error_msg = """❌ GPU REQUIRED - APPLICATION CANNOT RUN ON CPU
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚫 ERROR: No CUDA-compatible GPU detected!
+🖥️  This application requires a GPU to run efficiently.
+💡 Please ensure you have:
+   • NVIDIA GPU with CUDA support
+   • Proper CUDA drivers installed
+   • PyTorch with CUDA support
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+            yield error_msg
+            return
+
+        # Display GPU information
+        gpu_info = f"🚀 GPU DETECTED: {torch.cuda.get_device_name(0)}"
+        gpu_memory = f"💾 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+        yield f"✅ {gpu_info}\n✅ {gpu_memory}"
+
         # Use input model name or default
         model_name = model_name_input.strip() if model_name_input.strip() else ""
 
@@ -61,19 +80,23 @@ def load_model(model_name_input=""):
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=hf_token if hf_token else None,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None,
+            torch_dtype=torch.float16,  # Force float16 for GPU efficiency
+            device_map="auto",  # Force auto device mapping for GPU
             low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
 
-        # Move to GPU if available
-        if torch.cuda.is_available() and model.device.type == "cpu":
-            model = model.cuda()
+        # Ensure model is on GPU - this should always be true now
+        if model.device.type == "cpu":
+            yield "❌ ERROR: Model loaded on CPU despite GPU being available. This should not happen!"
+            return
+
+        gpu_device = f"🎯 Model loaded on: {model.device}"
+        yield gpu_device
 
         yield "🔄 Setting up LangChain pipeline..."
 
-        # Create HuggingFace pipeline for text generation
+        # Create HuggingFace pipeline for text generation (force GPU device)
         hf_pipeline = pipeline(
             "text-generation",
             model=model,
@@ -86,7 +109,16 @@ def load_model(model_name_input=""):
             return_full_text=False,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            device=0,  # Force GPU device 0
         )
+
+        # Verify pipeline is using GPU
+        pipeline_device = (
+            hf_pipeline.model.device
+            if hasattr(hf_pipeline.model, "device")
+            else "unknown"
+        )
+        yield f"🎯 Pipeline device: {pipeline_device}"
 
         # Create LangChain HuggingFace pipeline
         llm_pipeline = HuggingFacePipeline(pipeline=hf_pipeline)
@@ -109,8 +141,17 @@ Please read and understand the database schema carefully, and generate an execut
         # Create LCEL chain (modern LangChain syntax)
         llm_chain = prompt_template | llm_pipeline
 
-        device_info = f"({model.device})" if hasattr(model, "device") else ""
-        yield f"✅ Model and LangChain pipeline loaded successfully! {device_info}"
+        # Final GPU status and memory usage
+        gpu_memory_allocated = torch.cuda.memory_allocated() / 1e9  # Convert to GB
+        gpu_memory_reserved = torch.cuda.memory_reserved() / 1e9  # Convert to GB
+        gpu_final_status = f"""
+🎯 GPU Setup Complete:
+   • Device: {model.device}
+   • Memory Allocated: {gpu_memory_allocated:.2f} GB
+   • Memory Reserved: {gpu_memory_reserved:.2f} GB
+   • Status: Ready for inference"""
+
+        yield f"✅ Model and LangChain pipeline loaded successfully! {gpu_final_status}"
 
     except Exception as e:
         yield f"❌ Error loading model: {str(e)}"
@@ -365,19 +406,40 @@ def execute_generated_sql(sql_query):
     if not sql_query.strip():
         return "❌ No SQL query to execute.", ""
 
+    # Enhanced status message with query preview
+    query_preview = (
+        sql_query.strip()[:100] + "..."
+        if len(sql_query.strip()) > 100
+        else sql_query.strip()
+    )
+
     # Execute the query
     success, message, df = execute_sql_query(sql_query)
 
     if not success:
-        return message, ""
+        return (
+            f"❌ Query Execution Failed\n{'─' * 40}\n🔍 Query: {query_preview}\n💥 Error: {message}",
+            "",
+        )
 
     if df is None:
-        return message, ""
+        return (
+            f"✅ Query Executed Successfully\n{'─' * 40}\n🔍 Query: {query_preview}\n📋 Result: {message}",
+            "",
+        )
+
+    # Enhanced success message
+    success_msg = f"""✅ QUERY EXECUTED SUCCESSFULLY
+{"=" * 50}
+🔍 Query: {query_preview}
+📊 Retrieved: {len(df)} rows × {len(df.columns)} columns
+⏱️ Status: {message}
+{"=" * 50}"""
 
     # Format results for display
     formatted_results = format_query_results(df)
 
-    return message, formatted_results
+    return success_msg, formatted_results
 
 
 # Example schemas
@@ -877,23 +939,261 @@ def execute_sql_query(sql_query):
 
 
 def format_query_results(df):
-    """Format query results for display"""
+    """Format query results for display with enhanced UI"""
     if df is None or df.empty:
-        return "No results to display."
+        return "📄 No results to display."
 
     try:
-        # Use tabulate for nice formatting
-        formatted_table = tabulate(df, headers="keys", tablefmt="grid", showindex=False)
+        # Get basic info about the data
+        num_rows = len(df)
+        num_cols = len(df.columns)
 
-        # Add some summary information
-        summary = f"Query Results ({len(df)} rows, {len(df.columns)} columns)\n"
-        summary += "=" * 50 + "\n"
-        summary += formatted_table
+        # Create a more visually appealing header
+        header = f"""
+🔍 QUERY RESULTS SUMMARY
+{"=" * 60}
+📊 Dimensions: {num_rows} rows × {num_cols} columns
+📋 Columns: {", ".join(df.columns)}
+{"=" * 60}
 
-        return summary
-    except Exception:
-        # Fallback to simple string representation
-        return f"Results ({len(df)} rows):\n\n{df.to_string(index=False)}"
+"""
+
+        # For large datasets, show sample and summary
+        if num_rows > 20:
+            # Show first 10 and last 5 rows with a separator
+            top_rows = df.head(10)
+            bottom_rows = df.tail(5)
+
+            # Format top rows
+            top_table = tabulate(
+                top_rows,
+                headers="keys",
+                tablefmt="fancy_grid",
+                showindex=True,
+                numalign="right",
+                stralign="left",
+            )
+
+            # Format bottom rows (adjust index to show actual row numbers)
+            bottom_df = bottom_rows.copy()
+            bottom_df.index = range(num_rows - 5, num_rows)
+            bottom_table = tabulate(
+                bottom_df,
+                headers="keys",
+                tablefmt="fancy_grid",
+                showindex=True,
+                numalign="right",
+                stralign="left",
+            )
+
+            # Combine with separator
+            separator = f"\n{'⋮' * 20} ({num_rows - 15} more rows) {'⋮' * 20}\n"
+            formatted_table = top_table + separator + bottom_table
+
+            # Add summary statistics for numeric columns
+            numeric_cols = df.select_dtypes(include=["number"]).columns
+            if len(numeric_cols) > 0:
+                stats_info = "\n\n📈 NUMERIC COLUMN STATISTICS\n" + "─" * 40 + "\n"
+                for col in numeric_cols:
+                    col_stats = df[col].describe()
+                    stats_info += f"\n🔢 {col}:\n"
+                    stats_info += f"   Min: {col_stats['min']:.2f} | Max: {col_stats['max']:.2f}\n"
+                    stats_info += f"   Mean: {col_stats['mean']:.2f} | Std: {col_stats['std']:.2f}\n"
+                header += stats_info + "\n"
+        else:
+            # For smaller datasets, show all rows with enhanced formatting
+            formatted_table = tabulate(
+                df,
+                headers="keys",
+                tablefmt="fancy_grid",
+                showindex=True,
+                numalign="right",
+                stralign="left",
+                maxcolwidths=[30] * len(df.columns),  # Limit column width
+            )
+
+        # Add data type information
+        dtype_info = "\n\n🏷️  COLUMN DATA TYPES\n" + "─" * 30 + "\n"
+        for col, dtype in df.dtypes.items():
+            dtype_info += f"• {col}: {dtype}\n"
+
+        # Add data insights
+        insights = create_data_insights(df)
+        insights_section = f"\n\n{insights}" if insights else ""
+
+        result = header + formatted_table + dtype_info + insights_section
+
+        # Add footer with helpful tips
+        footer = f"""
+\n{"=" * 60}
+💡 Tips:
+   • Total records displayed: {min(num_rows, 20)} of {num_rows}
+   • Use horizontal scroll if columns are cut off
+   • Check data types above for proper interpretation
+{"=" * 60}
+"""
+
+        return result + footer
+
+    except Exception as e:
+        # Enhanced fallback formatting
+        fallback = f"""
+❌ Error formatting results: {str(e)}
+
+📋 BASIC VIEW ({len(df)} rows × {len(df.columns)} columns)
+{"─" * 50}
+{df.to_string(index=True, max_rows=20, max_cols=10)}
+
+🏷️  Column Types: {dict(df.dtypes)}
+"""
+        return fallback
+
+
+def create_data_insights(df):
+    """Create additional data insights and analysis"""
+    if df is None or df.empty:
+        return ""
+
+    insights = []
+
+    # Basic data quality checks
+    null_counts = df.isnull().sum()
+    if null_counts.sum() > 0:
+        insights.append("⚠️  DATA QUALITY ALERTS")
+        insights.append("─" * 25)
+        for col, null_count in null_counts.items():
+            if null_count > 0:
+                percentage = (null_count / len(df)) * 100
+                insights.append(
+                    f"• {col}: {null_count} null values ({percentage:.1f}%)"
+                )
+        insights.append("")
+
+    # Duplicate detection
+    duplicate_count = df.duplicated().sum()
+    if duplicate_count > 0:
+        insights.append(
+            f"🔍 Found {duplicate_count} duplicate rows ({(duplicate_count / len(df) * 100):.1f}%)"
+        )
+        insights.append("")
+
+    # Categorical data analysis
+    categorical_cols = df.select_dtypes(include=["object", "category"]).columns
+    if len(categorical_cols) > 0:
+        insights.append("📊 CATEGORICAL DATA SUMMARY")
+        insights.append("─" * 30)
+        for col in categorical_cols[:3]:  # Limit to first 3 columns
+            unique_count = df[col].nunique()
+            most_common = df[col].value_counts().head(3)
+            insights.append(f"• {col}: {unique_count} unique values")
+            insights.append(
+                f"  Top values: {', '.join([f'{val}({count})' for val, count in most_common.items()])}"
+            )
+        insights.append("")
+
+    # Numeric data patterns
+    numeric_cols = df.select_dtypes(include=["number"]).columns
+    if len(numeric_cols) > 0:
+        insights.append("📈 NUMERIC DATA PATTERNS")
+        insights.append("─" * 25)
+        for col in numeric_cols[:3]:  # Limit to first 3 columns
+            col_data = df[col].dropna()
+            if len(col_data) > 0:
+                # Check for potential outliers (values beyond 3 standard deviations)
+                mean_val = col_data.mean()
+                std_val = col_data.std()
+                outliers = col_data[
+                    (col_data < mean_val - 3 * std_val)
+                    | (col_data > mean_val + 3 * std_val)
+                ]
+
+                insights.append(
+                    f"• {col}: Range [{col_data.min():.2f} - {col_data.max():.2f}]"
+                )
+                if len(outliers) > 0:
+                    insights.append(f"  ⚠️  {len(outliers)} potential outliers detected")
+        insights.append("")
+
+    return "\n".join(insights)
+
+
+def create_quick_preview(df, max_rows=5):
+    """Create a quick preview of the data for large datasets"""
+    if df is None or df.empty:
+        return "No data to preview."
+
+    preview_lines = []
+    preview_lines.append("🔍 QUICK DATA PREVIEW")
+    preview_lines.append("─" * 25)
+
+    # Show basic structure
+    preview_lines.append(f"Shape: {df.shape[0]} rows × {df.shape[1]} columns")
+    preview_lines.append(
+        f"Columns: {', '.join(df.columns[:5])}{'...' if len(df.columns) > 5 else ''}"
+    )
+    preview_lines.append("")
+
+    # Show sample rows in a compact format
+    preview_lines.append("Sample rows:")
+    for i, (idx, row) in enumerate(df.head(max_rows).iterrows()):
+        if i >= max_rows:
+            break
+        row_str = " | ".join(
+            [
+                f"{col}: {str(val)[:20]}{'...' if len(str(val)) > 20 else ''}"
+                for col, val in row.items()[:3]
+            ]
+        )
+        preview_lines.append(f"  Row {idx}: {row_str}")
+
+    return "\n".join(preview_lines)
+
+
+def validate_gpu_requirements():
+    """Validate GPU requirements before starting the application"""
+    if not torch.cuda.is_available():
+        error_message = """
+🚫 CRITICAL ERROR: GPU REQUIRED BUT NOT AVAILABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❌ This application requires a CUDA-compatible GPU to run.
+❌ No GPU was detected on this system.
+
+🔧 TROUBLESHOOTING STEPS:
+   1. Ensure you have an NVIDIA GPU installed
+   2. Install CUDA drivers: https://developer.nvidia.com/cuda-downloads
+   3. Install PyTorch with CUDA support:
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+   4. Verify installation: python -c "import torch; print(torch.cuda.is_available())"
+
+🖥️  SYSTEM INFO:
+   • PyTorch version: {torch.__version__}
+   • CUDA available: {torch.cuda.is_available()}
+   • CUDA version: {torch.version.cuda if torch.cuda.is_available() else 'Not available'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        print(error_message)
+        raise RuntimeError(
+            "GPU is required but not available. Cannot start application."
+        )
+
+    # Display GPU information
+    gpu_count = torch.cuda.device_count()
+    current_gpu = torch.cuda.current_device()
+    gpu_name = torch.cuda.get_device_name(current_gpu)
+    gpu_memory = torch.cuda.get_device_properties(current_gpu).total_memory / 1e9
+
+    print(f"""
+✅ GPU VALIDATION SUCCESSFUL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 GPU Detected: {gpu_name}
+💾 GPU Memory: {gpu_memory:.1f} GB
+🔢 GPU Count: {gpu_count}
+🎯 Current Device: cuda:{current_gpu}
+🔥 Ready for model loading!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+""")
 
 
 # Create Gradio interface
@@ -981,6 +1281,43 @@ def create_interface():
             color: #3498db !important;
             margin-bottom: 8px !important;
             font-size: 16px !important;
+        }
+        .query-results-box {
+            background: #1a1a1a !important;
+            border: 2px solid #3498db !important;
+            border-radius: 8px !important;
+            padding: 15px !important;
+            margin: 10px 0 !important;
+            font-family: 'Courier New', monospace !important;
+            font-size: 12px !important;
+            line-height: 1.4 !important;
+            color: #e8e8e8 !important;
+            overflow-x: auto !important;
+            white-space: pre !important;
+        }
+        .query-results-box textarea {
+            background: #1a1a1a !important;
+            color: #e8e8e8 !important;
+            font-family: 'Courier New', monospace !important;
+            font-size: 12px !important;
+            line-height: 1.4 !important;
+            border: none !important;
+            resize: vertical !important;
+        }
+        .query-results-box::-webkit-scrollbar {
+            width: 8px !important;
+            height: 8px !important;
+        }
+        .query-results-box::-webkit-scrollbar-track {
+            background: #2c3e50 !important;
+            border-radius: 4px !important;
+        }
+        .query-results-box::-webkit-scrollbar-thumb {
+            background: #3498db !important;
+            border-radius: 4px !important;
+        }
+        .query-results-box::-webkit-scrollbar-thumb:hover {
+            background: #5dade2 !important;
         }
         """,
     ) as demo:
@@ -1088,14 +1425,15 @@ def create_interface():
                                 show_label=True,
                             )
 
-                    # Query results
+                    # Query results with enhanced styling
                     query_results = gr.Textbox(
-                        label="📋 Query Results",
-                        lines=12,
-                        max_lines=20,
+                        label="📋 Query Results & Data Analysis",
+                        lines=20,
+                        max_lines=30,
                         interactive=False,
-                        elem_classes="status-box",
+                        elem_classes="query-results-box",
                         show_label=True,
+                        placeholder="Query results will appear here with detailed formatting, statistics, and data insights...",
                     )
 
             with gr.Column(scale=1):
@@ -1229,5 +1567,8 @@ def create_interface():
 
 
 if __name__ == "__main__":
+    # Validate GPU requirements at startup
+    validate_gpu_requirements()
+
     demo = create_interface()
     demo.launch(server_name="0.0.0.0", server_port=7860, share=True, show_error=True)
